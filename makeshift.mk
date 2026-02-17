@@ -31,8 +31,9 @@ TST_OBJ_DIR := $(TST_DIR)/bld
 # Dependency include scanning (dep/*)
 # -----------------------------------
 DEP_ROOT := dep
+DEP_ROOT_ABS := $(abspath $(DEP_ROOT))
 DEP_MAP_DIR := $(OBJ_DIR)/depinc
-DEP_NAMES := $(shell [ -d "$(DEP_ROOT)" ] && find "$(DEP_ROOT)" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; || true)
+DEP_NAMES := $(shell [ -d "$(DEP_ROOT)" ] && for p in "$(DEP_ROOT)"/*; do [ -d "$$p" ] && basename "$$p"; done || true)
 DEP_INC_DIRS := $(wildcard $(DEP_ROOT)/*/src/inc)
 DEP_INC_FLAGS := $(foreach dir,$(DEP_INC_DIRS),-I$(dir))
 
@@ -239,9 +240,9 @@ dep-incmap:
 	$(Q)mkdir -p "$(DEP_MAP_DIR)"
 	$(Q)for d in $(DEP_NAMES); do \
 		if [ -d "$(DEP_ROOT)/$$d/src/inc/$$d" ]; then \
-			ln -sfn "../../$(DEP_ROOT)/$$d/src/inc/$$d" "$(DEP_MAP_DIR)/$$d"; \
+			ln -sfn "$(DEP_ROOT_ABS)/$$d/src/inc/$$d" "$(DEP_MAP_DIR)/$$d"; \
 		elif [ -d "$(DEP_ROOT)/$$d/src/inc" ]; then \
-			ln -sfn "../../$(DEP_ROOT)/$$d/src/inc" "$(DEP_MAP_DIR)/$$d"; \
+			ln -sfn "$(DEP_ROOT_ABS)/$$d/src/inc" "$(DEP_MAP_DIR)/$$d"; \
 		fi; \
 	done
 
