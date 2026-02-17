@@ -25,7 +25,6 @@ OUT_DIR := bld
 TST_DIR := $(SRC_DIR)/tst
 TST_UT_DIR := $(TST_DIR)/ut
 TST_SY_DIR := $(TST_DIR)/sy
-TST_OBJ_DIR := $(TST_DIR)/bld
 
 # -----------------------------------
 # Dependency include scanning (dep/*)
@@ -270,7 +269,7 @@ tests: ut sy
 
 clean-all:
 	$(Q)echo "Cleaning build artefacts..."
-	$(Q)for d in "$(OBJ_DIR)" "$(TST_OBJ_DIR)" "$(OUT_DIR)"; do \
+	$(Q)for d in "$(OBJ_DIR)" "$(OUT_DIR)"; do \
 		mkdir -p "$$d"; \
 		find "$$d" -mindepth 1 \( -type f -o -type l \) ! -name ".gitignore" -delete; \
 		find "$$d" -mindepth 1 -type d -empty -delete; \
