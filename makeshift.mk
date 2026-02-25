@@ -45,6 +45,7 @@ AR  ?= ar
 # MODE and CXX_STD may be set in makefile.project.mk
 MODE ?= debug
 CXX_STD ?= c++20
+FILTER ?= $(filter)
 
 
 # -----------------------------------
@@ -232,6 +233,7 @@ help:
 	@echo "Options:"
 	@echo "  MODE=debug|release"
 	@echo "  VERBOSE=1"
+	@echo "  FILTER=<substring>   Filter tests by name (e.g. make tests FILTER=math)"
 
 
 .PHONY: dep-incmap
@@ -249,7 +251,29 @@ dep-incmap:
 ut:
 	@if [ -f "$(TST_UT_DIR)/Makefile" ] || [ -f "$(TST_UT_DIR)/makefile" ]; then \
 		$(MAKE) -C "$(TST_UT_DIR)" all; \
-		$(MAKE) -C "$(TST_UT_DIR)" run; \
+		if [ -n "$(FILTER)" ]; then \
+			echo "Running filtered unit tests (FILTER=$(FILTER))..."; \
+			found=0; \
+			for bin in "$(TST_UT_DIR)"/bld/TEST_*; do \
+				if [ -x "$$bin" ] && [ -f "$$bin" ]; then \
+					base="$$(basename "$$bin")"; \
+					base_lc="$$(printf "%s" "$$base" | tr '[:upper:]' '[:lower:]')"; \
+					filter_lc="$$(printf "%s" "$(FILTER)" | tr '[:upper:]' '[:lower:]')"; \
+					case "$$base_lc" in \
+						*$$filter_lc*) \
+							echo "→ Running $$bin"; \
+							"$$bin" || exit 1; \
+							found=1; \
+							;; \
+					esac; \
+				fi; \
+			done; \
+			if [ "$$found" -eq 0 ]; then \
+				echo "No unit tests matched FILTER=$(FILTER)"; \
+			fi; \
+		else \
+			$(MAKE) -C "$(TST_UT_DIR)" run; \
+		fi; \
 	else \
 		echo "No unit test Makefile found in $(TST_UT_DIR)"; \
 	fi
@@ -257,7 +281,7 @@ ut:
 .PHONY: sy
 sy: all
 	@if [ -x "$(TST_SY_DIR)/runner" ]; then \
-		"$(TST_SY_DIR)/runner"; \
+		FILTER="$(FILTER)" "$(TST_SY_DIR)/runner"; \
 	else \
 		echo "No system test runner found at $(TST_SY_DIR)/runner"; \
 	fi
