@@ -130,6 +130,9 @@ else
   Q := @
 endif
 
+# Suppress recursive-make directory enter/leave messages
+MAKEFLAGS += --no-print-directory
+
 # -----------------------------------
 # Compilation rules
 # -----------------------------------
