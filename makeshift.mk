@@ -147,25 +147,25 @@ $(OBJ_DIR)/bin/%.o: $(BIN_DIR)/%.cpp
 $(OBJ_DIR)/lib/%.o: $(LIB_DIR)/%.cpp
 	$(Q)mkdir -p $(dir $@)
 	$(Q)echo "C++ (lib): $<"
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -MT $@ -MF $(@:.o=.d) -c $< -o $@
+	$(CXX) -I$(INC_DIR)/$(dir $*) $(CPPFLAGS) $(CXXFLAGS) -MT $@ -MF $(@:.o=.d) -c $< -o $@
 
 # C sources in src/lib
 $(OBJ_DIR)/lib/%.o: $(LIB_DIR)/%.c
 	$(Q)mkdir -p $(dir $@)
 	$(Q)echo "C (lib): $<"
-	$(CXX) $(CPPFLAGS) -x c -MT $@ -MF $(@:.o=.d) -c $< -o $@
+	$(CXX) -I$(INC_DIR)/$(dir $*) $(CPPFLAGS) -x c -MT $@ -MF $(@:.o=.d) -c $< -o $@
 
 # C++ sources in src/lib compiled with PIC for shared library target
 $(OBJ_DIR)/lib/%.pic.o: $(LIB_DIR)/%.cpp
 	$(Q)mkdir -p $(dir $@)
 	$(Q)echo "C++ (lib,pic): $<"
-	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -fPIC -MT $@ -MF $(@:.o=.d) -c $< -o $@
+	$(CXX) -I$(INC_DIR)/$(dir $*) $(CPPFLAGS) $(CXXFLAGS) -fPIC -MT $@ -MF $(@:.o=.d) -c $< -o $@
 
 # C sources in src/lib compiled with PIC for shared library target
 $(OBJ_DIR)/lib/%.pic.o: $(LIB_DIR)/%.c
 	$(Q)mkdir -p $(dir $@)
 	$(Q)echo "C (lib,pic): $<"
-	$(CXX) $(CPPFLAGS) -fPIC -x c -MT $@ -MF $(@:.o=.d) -c $< -o $@
+	$(CXX) -I$(INC_DIR)/$(dir $*) $(CPPFLAGS) -fPIC -x c -MT $@ -MF $(@:.o=.d) -c $< -o $@
 
 
 
