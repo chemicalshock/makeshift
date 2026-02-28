@@ -19,6 +19,15 @@ SRC_DIR := src
 BIN_DIR := $(SRC_DIR)/bin
 LIB_DIR := $(SRC_DIR)/lib
 INC_DIR := $(SRC_DIR)/inc
+
+# automatically collect every subdirectory beneath the public include
+# tree.  This saves callers from having to add -I for each new component
+# manually; the recursive find handles arbitrarily deep hierarchies.
+#
+# Note: the find pipes stderr to /dev/null in case the directory doesn't
+# exist yet (e.g. early in a fresh checkout).
+INC_SUBDIRS := $(shell find $(INC_DIR) -type d 2>/dev/null)
+INC_SUBDIR_FLAGS := $(foreach dir,$(INC_SUBDIRS),-I$(dir))
 OBJ_DIR := $(SRC_DIR)/bld
 OUT_DIR := bld
 
@@ -51,7 +60,7 @@ FILTER ?= $(filter)
 # -----------------------------------
 # Flags and options
 # -----------------------------------
-CPPFLAGS += -I$(INC_DIR) $(DEP_INC_FLAGS) -I$(DEP_MAP_DIR) -MMD -MP
+CPPFLAGS += -I$(INC_DIR) $(INC_SUBDIR_FLAGS) $(DEP_INC_FLAGS) -I$(DEP_MAP_DIR) -MMD -MP
 CXXFLAGS += -std=$(CXX_STD) -Wall -Wextra -Wpedantic
 LDFLAGS +=
 LDLIBS +=
