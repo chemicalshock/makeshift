@@ -30,8 +30,8 @@ INC_SUBDIRS := $(shell find $(INC_DIR) -type d 2>/dev/null)
 INC_SUBDIR_FLAGS := $(foreach dir,$(INC_SUBDIRS),-I$(dir))
 OBJ_DIR := $(SRC_DIR)/bld
 OUT_DIR := bld
-abi_obj_dir = $(OBJ_DIR)/$1
-abi_out_dir = $(OUT_DIR)/$1
+abi_obj_dir = $(OBJ_DIR)/$(1)
+abi_out_dir = $(OUT_DIR)/$(1)
 
 TST_DIR := $(SRC_DIR)/tst
 TST_UT_DIR := $(TST_DIR)/ut
@@ -70,17 +70,17 @@ FILTER ?= $(filter)
 # the source extension, so:
 #   foo.m32.S   -> foo.S
 #   foo.m64.asm -> foo.asm
-strip_asm_mode_marker = $(patsubst %.m32.S,%.S,$(patsubst %.m64.S,%.S,$(patsubst %.m32.asm,%.asm,$(patsubst %.m64.asm,%.asm,$1))))
+strip_asm_mode_marker = $(patsubst %.m32.S,%.S,$(patsubst %.m64.S,%.S,$(patsubst %.m32.asm,%.asm,$(patsubst %.m64.asm,%.asm,$(1)))))
 
 # Convert a source path under src/ to its ABI-specific object path under
 # src/bld/<abi>/, while also stripping the optional mode marker from the
 # basename.
-src_to_obj = $(patsubst $(SRC_DIR)/%.cpp,$(call abi_obj_dir,$1)/%.o,$(patsubst $(SRC_DIR)/%.c,$(call abi_obj_dir,$1)/%.o,$(patsubst $(SRC_DIR)/%.S,$(call abi_obj_dir,$1)/%.o,$(patsubst $(SRC_DIR)/%.asm,$(call abi_obj_dir,$1)/%.o,$(call strip_asm_mode_marker,$2)))))
-src_to_pic_obj = $(patsubst $(SRC_DIR)/%.cpp,$(call abi_obj_dir,$1)/%.pic.o,$(patsubst $(SRC_DIR)/%.c,$(call abi_obj_dir,$1)/%.pic.o,$(patsubst $(SRC_DIR)/%.S,$(call abi_obj_dir,$1)/%.pic.o,$(patsubst $(SRC_DIR)/%.asm,$(call abi_obj_dir,$1)/%.pic.o,$(call strip_asm_mode_marker,$2)))))
+src_to_obj = $(patsubst $(SRC_DIR)/%.cpp,$(call abi_obj_dir,$(1))/%.o,$(patsubst $(SRC_DIR)/%.c,$(call abi_obj_dir,$(1))/%.o,$(patsubst $(SRC_DIR)/%.S,$(call abi_obj_dir,$(1))/%.o,$(patsubst $(SRC_DIR)/%.asm,$(call abi_obj_dir,$(1))/%.o,$(call strip_asm_mode_marker,$(2))))))
+src_to_pic_obj = $(patsubst $(SRC_DIR)/%.cpp,$(call abi_obj_dir,$(1))/%.pic.o,$(patsubst $(SRC_DIR)/%.c,$(call abi_obj_dir,$(1))/%.pic.o,$(patsubst $(SRC_DIR)/%.S,$(call abi_obj_dir,$(1))/%.pic.o,$(patsubst $(SRC_DIR)/%.asm,$(call abi_obj_dir,$(1))/%.pic.o,$(call strip_asm_mode_marker,$(2))))))
 
 # Given a list of flagged sources, derive the matching plain source names
 # so they can be excluded from the normal source list.
-flagged_to_plain = $(foreach f,$1,$(call strip_asm_mode_marker,$(f)))
+flagged_to_plain = $(foreach f,$(1),$(call strip_asm_mode_marker,$(f)))
 
 # -----------------------------------
 # Flags and options
@@ -114,11 +114,20 @@ ASM_PICFLAGS += $(USER_ASM_PICFLAGS)
 # Architecture-specific flag filtering
 # -----------------------------------
 
-arch_filter_m32 = $(filter-out -m64 -m32 -mcmodel=%,$1)
-arch_filter_m64 = $(filter-out -m32 -m64,$1)
+arch_filter_m32 = $(filter-out -m64 -m32 -mcmodel=%,$(1))
+arch_filter_m64 = $(filter-out -m32 -m64,$(1))
 
 ARCHFLAGS_m32 := -m32
 ARCHFLAGS_m64 := -m64
+
+# Bare linkers such as ld/ld.lld do not accept compiler-style -m32/-m64
+# switches. Keep separate linker arch flags so projects that link via ld
+# can rely on explicit emulation flags in USER_LDFLAGS instead.
+is_ld_linker = $(strip $(filter ld ld.% %ld %ld.%,$(notdir $(1))))
+EXE_ARCHFLAGS_m32 ?= $(if $(call is_ld_linker,$(EXE_LINKER)),,$(ARCHFLAGS_m32))
+EXE_ARCHFLAGS_m64 ?= $(if $(call is_ld_linker,$(EXE_LINKER)),,$(ARCHFLAGS_m64))
+SHARED_ARCHFLAGS_m32 ?= $(if $(call is_ld_linker,$(SHARED_LINKER)),,$(ARCHFLAGS_m32))
+SHARED_ARCHFLAGS_m64 ?= $(if $(call is_ld_linker,$(SHARED_LINKER)),,$(ARCHFLAGS_m64))
 
 CXXFLAGS_m32 := $(call arch_filter_m32,$(CXXFLAGS))
 CXXFLAGS_m64 := $(call arch_filter_m64,$(CXXFLAGS))
@@ -155,9 +164,9 @@ endif
 
 SINGLE_ABI := $(if $(filter 1,$(words $(BUILD_ABIS))),$(firstword $(BUILD_ABIS)))
 
-default_exec_out = $(call abi_out_dir,$1)/$(BIN_NAME)
-default_static_out = $(call abi_out_dir,$1)/lib$(LIB_BASENAME).a
-default_shared_out = $(call abi_out_dir,$1)/lib$(LIB_BASENAME).so
+default_exec_out = $(call abi_out_dir,$(1))/$(BIN_NAME)
+default_static_out = $(call abi_out_dir,$(1))/lib$(LIB_BASENAME).a
+default_shared_out = $(call abi_out_dir,$(1))/lib$(LIB_BASENAME).so
 
 ifneq ($(strip $(EXEC_OUT)),)
 ifneq ($(words $(BUILD_ABIS)),1)
@@ -237,19 +246,19 @@ LIB_ASM_SOURCES_$1 := $$(LIB_ASM_PLAIN_SOURCES_$1) $$(LIB_ASM_FLAGGED_SOURCES_$1
 
 LIB_SOURCES_$1 := $(LIB_CPP_SOURCES) $(LIB_C_SOURCES) $$(LIB_S_SOURCES_$1) $$(LIB_ASM_SOURCES_$1)
 
-BIN_OBJECTS_$1 := $(foreach f,$(BIN_SOURCES),$(call src_to_obj,$1,$(f)))
-BIN_OBJECTS_$1 += $(foreach f,$$(BIN_S_SOURCES_$1),$(call src_to_obj,$1,$(f)))
-BIN_OBJECTS_$1 += $(foreach f,$$(BIN_ASM_SOURCES_$1),$(call src_to_obj,$1,$(f)))
+BIN_OBJECTS_$1 := $$(foreach f,$$(BIN_SOURCES),$$(call src_to_obj,$1,$$(f)))
+BIN_OBJECTS_$1 += $$(foreach f,$$(BIN_S_SOURCES_$1),$$(call src_to_obj,$1,$$(f)))
+BIN_OBJECTS_$1 += $$(foreach f,$$(BIN_ASM_SOURCES_$1),$$(call src_to_obj,$1,$$(f)))
 
-LIB_CPP_OBJECTS_$1 := $(foreach f,$(LIB_CPP_SOURCES),$(call src_to_obj,$1,$(f)))
-LIB_C_OBJECTS_$1 := $(foreach f,$(LIB_C_SOURCES),$(call src_to_obj,$1,$(f)))
-LIB_S_OBJECTS_$1 := $(foreach f,$$(LIB_S_SOURCES_$1),$(call src_to_obj,$1,$(f)))
-LIB_ASM_OBJECTS_$1 := $(foreach f,$$(LIB_ASM_SOURCES_$1),$(call src_to_obj,$1,$(f)))
+LIB_CPP_OBJECTS_$1 := $$(foreach f,$$(LIB_CPP_SOURCES),$$(call src_to_obj,$1,$$(f)))
+LIB_C_OBJECTS_$1 := $$(foreach f,$$(LIB_C_SOURCES),$$(call src_to_obj,$1,$$(f)))
+LIB_S_OBJECTS_$1 := $$(foreach f,$$(LIB_S_SOURCES_$1),$$(call src_to_obj,$1,$$(f)))
+LIB_ASM_OBJECTS_$1 := $$(foreach f,$$(LIB_ASM_SOURCES_$1),$$(call src_to_obj,$1,$$(f)))
 
-LIB_CPP_PIC_OBJECTS_$1 := $(foreach f,$(LIB_CPP_SOURCES),$(call src_to_pic_obj,$1,$(f)))
-LIB_C_PIC_OBJECTS_$1 := $(foreach f,$(LIB_C_SOURCES),$(call src_to_pic_obj,$1,$(f)))
-LIB_S_PIC_OBJECTS_$1 := $(foreach f,$$(LIB_S_SOURCES_$1),$(call src_to_pic_obj,$1,$(f)))
-LIB_ASM_PIC_OBJECTS_$1 := $(foreach f,$$(LIB_ASM_SOURCES_$1),$(call src_to_pic_obj,$1,$(f)))
+LIB_CPP_PIC_OBJECTS_$1 := $$(foreach f,$$(LIB_CPP_SOURCES),$$(call src_to_pic_obj,$1,$$(f)))
+LIB_C_PIC_OBJECTS_$1 := $$(foreach f,$$(LIB_C_SOURCES),$$(call src_to_pic_obj,$1,$$(f)))
+LIB_S_PIC_OBJECTS_$1 := $$(foreach f,$$(LIB_S_SOURCES_$1),$$(call src_to_pic_obj,$1,$$(f)))
+LIB_ASM_PIC_OBJECTS_$1 := $$(foreach f,$$(LIB_ASM_SOURCES_$1),$$(call src_to_pic_obj,$1,$$(f)))
 
 LIB_OBJECTS_$1 := $$(LIB_CPP_OBJECTS_$1) $$(LIB_C_OBJECTS_$1) $$(LIB_S_OBJECTS_$1) $$(LIB_ASM_OBJECTS_$1)
 LIB_PIC_OBJECTS_$1 := $$(LIB_CPP_PIC_OBJECTS_$1) $$(LIB_C_PIC_OBJECTS_$1) $$(LIB_S_PIC_OBJECTS_$1) $$(LIB_ASM_PIC_OBJECTS_$1)
@@ -393,7 +402,7 @@ exe-$1: dep-incmap $$(EXEC_OUT_$1)
 $$(EXEC_OUT_$1): $$(BIN_OBJECTS_$1) $$(LIB_OBJECTS_$1)
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "Link (exe, $1): $$@"
-	$$(Q)$$(EXE_LINKER) $$(LDFLAGS_$1) $$(ARCHFLAGS_$1) -o $$@ $$^ $$(LDLIBS)
+	$$(Q)$$(EXE_LINKER) $$(LDFLAGS_$1) $$(EXE_ARCHFLAGS_$1) -o $$@ $$^ $$(LDLIBS)
 
 .PHONY: static-$1
 static-$1: dep-incmap $$(STATIC_OUT_$1)
@@ -410,7 +419,7 @@ shared-$1: dep-incmap $$(SHARED_OUT_$1)
 $$(SHARED_OUT_$1): $$(LIB_PIC_OBJECTS_$1)
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "Link (shared, $1): $$@"
-	$$(Q)$$(SHARED_LINKER) -shared $$(LDFLAGS_$1) $$(ARCHFLAGS_$1) -o $$@ $$^ $$(LDLIBS)
+	$$(Q)$$(SHARED_LINKER) -shared $$(LDFLAGS_$1) $$(SHARED_ARCHFLAGS_$1) -o $$@ $$^ $$(LDLIBS)
 endef
 
 $(foreach abi,$(BUILD_ABIS),$(eval $(call define_abi_rules,$(abi))))
