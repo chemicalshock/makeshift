@@ -30,6 +30,8 @@ INC_SUBDIRS := $(shell find $(INC_DIR) -type d 2>/dev/null)
 INC_SUBDIR_FLAGS := $(foreach dir,$(INC_SUBDIRS),-I$(dir))
 OBJ_DIR := $(SRC_DIR)/bld
 OUT_DIR := bld
+abi_obj_dir = $(OBJ_DIR)/$1
+abi_out_dir = $(OUT_DIR)/$1
 
 TST_DIR := $(SRC_DIR)/tst
 TST_UT_DIR := $(TST_DIR)/ut
@@ -40,6 +42,8 @@ TST_SY_DIR := $(TST_DIR)/sy
 # -----------------------------------
 DEP_ROOT := dep
 DEP_ROOT_ABS := $(abspath $(DEP_ROOT))
+# Keep the dependency include map shared across ABI variants; the
+# symlinked include tree itself is architecture-neutral.
 DEP_MAP_DIR := $(OBJ_DIR)/depinc
 DEP_NAMES := $(shell [ -d "$(DEP_ROOT)" ] && for p in "$(DEP_ROOT)"/*; do [ -d "$$p" ] && basename "$$p"; done || true)
 DEP_INC_DIRS := $(wildcard $(DEP_ROOT)/*/src/inc)
@@ -68,10 +72,11 @@ FILTER ?= $(filter)
 #   foo.m64.asm -> foo.asm
 strip_asm_mode_marker = $(patsubst %.m32.S,%.S,$(patsubst %.m64.S,%.S,$(patsubst %.m32.asm,%.asm,$(patsubst %.m64.asm,%.asm,$1))))
 
-# Convert a source path under src/ to its object path under src/bld/,
-# while also stripping the optional mode marker from the basename.
-src_to_obj = $(patsubst $(SRC_DIR)/%.cpp,$(OBJ_DIR)/%.o,$(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(patsubst $(SRC_DIR)/%.S,$(OBJ_DIR)/%.o,$(patsubst $(SRC_DIR)/%.asm,$(OBJ_DIR)/%.o,$(call strip_asm_mode_marker,$1)))))
-src_to_pic_obj = $(patsubst $(SRC_DIR)/%.cpp,$(OBJ_DIR)/%.pic.o,$(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.pic.o,$(patsubst $(SRC_DIR)/%.S,$(OBJ_DIR)/%.pic.o,$(patsubst $(SRC_DIR)/%.asm,$(OBJ_DIR)/%.pic.o,$(call strip_asm_mode_marker,$1)))))
+# Convert a source path under src/ to its ABI-specific object path under
+# src/bld/<abi>/, while also stripping the optional mode marker from the
+# basename.
+src_to_obj = $(patsubst $(SRC_DIR)/%.cpp,$(call abi_obj_dir,$1)/%.o,$(patsubst $(SRC_DIR)/%.c,$(call abi_obj_dir,$1)/%.o,$(patsubst $(SRC_DIR)/%.S,$(call abi_obj_dir,$1)/%.o,$(patsubst $(SRC_DIR)/%.asm,$(call abi_obj_dir,$1)/%.o,$(call strip_asm_mode_marker,$2)))))
+src_to_pic_obj = $(patsubst $(SRC_DIR)/%.cpp,$(call abi_obj_dir,$1)/%.pic.o,$(patsubst $(SRC_DIR)/%.c,$(call abi_obj_dir,$1)/%.pic.o,$(patsubst $(SRC_DIR)/%.S,$(call abi_obj_dir,$1)/%.pic.o,$(patsubst $(SRC_DIR)/%.asm,$(call abi_obj_dir,$1)/%.pic.o,$(call strip_asm_mode_marker,$2)))))
 
 # Given a list of flagged sources, derive the matching plain source names
 # so they can be excluded from the normal source list.
@@ -106,27 +111,79 @@ S_PICFLAGS += $(USER_S_PICFLAGS)
 ASM_PICFLAGS += $(USER_ASM_PICFLAGS)
 
 # -----------------------------------
-# Architecture-specific assembly flag filtering
+# Architecture-specific flag filtering
 # -----------------------------------
 
-# Remove flags that should not leak into a forced 32-bit assembly build.
-SFLAGS_M32 := $(filter-out -m64 -m32 -mcmodel=%,$(SFLAGS))
-ASMFLAGS_M32 := $(filter-out -m64 -m32 -mcmodel=%,$(ASMFLAGS))
-S_PICFLAGS_M32 := $(filter-out -m64 -m32 -mcmodel=%,$(S_PICFLAGS))
-ASM_PICFLAGS_M32 := $(filter-out -m64 -m32 -mcmodel=%,$(ASM_PICFLAGS))
+arch_filter_m32 = $(filter-out -m64 -m32 -mcmodel=%,$1)
+arch_filter_m64 = $(filter-out -m32 -m64,$1)
 
-# Remove conflicting architecture selectors from forced 64-bit builds.
-SFLAGS_M64 := $(filter-out -m32 -m64,$(SFLAGS))
-ASMFLAGS_M64 := $(filter-out -m32 -m64,$(ASMFLAGS))
-S_PICFLAGS_M64 := $(filter-out -m32 -m64,$(S_PICFLAGS))
-ASM_PICFLAGS_M64 := $(filter-out -m32 -m64,$(ASM_PICFLAGS))
+ARCHFLAGS_m32 := -m32
+ARCHFLAGS_m64 := -m64
+
+CXXFLAGS_m32 := $(call arch_filter_m32,$(CXXFLAGS))
+CXXFLAGS_m64 := $(call arch_filter_m64,$(CXXFLAGS))
+LDFLAGS_m32 := $(call arch_filter_m32,$(LDFLAGS))
+LDFLAGS_m64 := $(call arch_filter_m64,$(LDFLAGS))
+SFLAGS_m32 := $(call arch_filter_m32,$(SFLAGS))
+SFLAGS_m64 := $(call arch_filter_m64,$(SFLAGS))
+ASMFLAGS_m32 := $(call arch_filter_m32,$(ASMFLAGS))
+ASMFLAGS_m64 := $(call arch_filter_m64,$(ASMFLAGS))
+S_PICFLAGS_m32 := $(call arch_filter_m32,$(S_PICFLAGS))
+S_PICFLAGS_m64 := $(call arch_filter_m64,$(S_PICFLAGS))
+ASM_PICFLAGS_m32 := $(call arch_filter_m32,$(ASM_PICFLAGS))
+ASM_PICFLAGS_m64 := $(call arch_filter_m64,$(ASM_PICFLAGS))
 
 # -----------------------------------
-# Output artefacts
+# ABI selection
 # -----------------------------------
-EXEC_OUT   ?= $(OUT_DIR)/$(BIN_NAME)
-STATIC_OUT ?= $(OUT_DIR)/lib$(LIB_BASENAME).a
-SHARED_OUT ?= $(OUT_DIR)/lib$(LIB_BASENAME).so
+BUILD_M32 ?= 0
+BUILD_M64 ?= 1
+
+BUILD_ABIS :=
+
+ifeq ($(BUILD_M32),1)
+  BUILD_ABIS += m32
+endif
+
+ifeq ($(BUILD_M64),1)
+  BUILD_ABIS += m64
+endif
+
+ifeq ($(strip $(BUILD_ABIS)),)
+  $(warning No ABIs enabled (BUILD_M32/BUILD_M64 both 0))
+endif
+
+SINGLE_ABI := $(if $(filter 1,$(words $(BUILD_ABIS))),$(firstword $(BUILD_ABIS)))
+
+default_exec_out = $(call abi_out_dir,$1)/$(BIN_NAME)
+default_static_out = $(call abi_out_dir,$1)/lib$(LIB_BASENAME).a
+default_shared_out = $(call abi_out_dir,$1)/lib$(LIB_BASENAME).so
+
+ifneq ($(strip $(EXEC_OUT)),)
+ifneq ($(words $(BUILD_ABIS)),1)
+  $(warning EXEC_OUT is ignored when multiple ABIs are enabled; use EXEC_OUT_m32 / EXEC_OUT_m64)
+endif
+endif
+
+ifneq ($(strip $(STATIC_OUT)),)
+ifneq ($(words $(BUILD_ABIS)),1)
+  $(warning STATIC_OUT is ignored when multiple ABIs are enabled; use STATIC_OUT_m32 / STATIC_OUT_m64)
+endif
+endif
+
+ifneq ($(strip $(SHARED_OUT)),)
+ifneq ($(words $(BUILD_ABIS)),1)
+  $(warning SHARED_OUT is ignored when multiple ABIs are enabled; use SHARED_OUT_m32 / SHARED_OUT_m64)
+endif
+endif
+
+define init_abi_outputs
+EXEC_OUT_$1 ?= $(if $(and $(filter $1,$(SINGLE_ABI)),$(strip $(EXEC_OUT))),$(EXEC_OUT),$(call default_exec_out,$1))
+STATIC_OUT_$1 ?= $(if $(and $(filter $1,$(SINGLE_ABI)),$(strip $(STATIC_OUT))),$(STATIC_OUT),$(call default_static_out,$1))
+SHARED_OUT_$1 ?= $(if $(and $(filter $1,$(SINGLE_ABI)),$(strip $(SHARED_OUT))),$(SHARED_OUT),$(call default_shared_out,$1))
+endef
+
+$(foreach abi,m32 m64,$(eval $(call init_abi_outputs,$(abi))))
 
 BUILD_TARGETS :=
 
@@ -152,50 +209,63 @@ endif
 
 BIN_SOURCES := $(wildcard $(BIN_DIR)/*.cpp)
 
-BIN_S_FLAGGED_SOURCES := $(wildcard $(BIN_DIR)/*.m32.S) $(wildcard $(BIN_DIR)/*.m64.S)
-BIN_S_PLAIN_SOURCES := $(filter-out $(call flagged_to_plain,$(BIN_S_FLAGGED_SOURCES)),$(wildcard $(BIN_DIR)/*.S))
-
-BIN_ASM_FLAGGED_SOURCES := $(wildcard $(BIN_DIR)/*.m32.asm) $(wildcard $(BIN_DIR)/*.m64.asm)
-BIN_ASM_PLAIN_SOURCES := $(filter-out $(call flagged_to_plain,$(BIN_ASM_FLAGGED_SOURCES)),$(wildcard $(BIN_DIR)/*.asm))
-
 LIB_CPP_SOURCES := $(shell [ -d "$(LIB_DIR)" ] && find "$(LIB_DIR)" -type f -name '*.cpp' || true)
 LIB_C_SOURCES := $(shell [ -d "$(LIB_DIR)" ] && find "$(LIB_DIR)" -type f -name '*.c' || true)
-
-LIB_S_FLAGGED_SOURCES := $(shell [ -d "$(LIB_DIR)" ] && find "$(LIB_DIR)" -type f \( -name '*.m32.S' -o -name '*.m64.S' \) || true)
-LIB_S_PLAIN_SOURCES := $(filter-out $(call flagged_to_plain,$(LIB_S_FLAGGED_SOURCES)),$(shell [ -d "$(LIB_DIR)" ] && find "$(LIB_DIR)" -type f -name '*.S' || true))
-
-LIB_ASM_FLAGGED_SOURCES := $(shell [ -d "$(LIB_DIR)" ] && find "$(LIB_DIR)" -type f \( -name '*.m32.asm' -o -name '*.m64.asm' \) || true)
-LIB_ASM_PLAIN_SOURCES := $(filter-out $(call flagged_to_plain,$(LIB_ASM_FLAGGED_SOURCES)),$(shell [ -d "$(LIB_DIR)" ] && find "$(LIB_DIR)" -type f -name '*.asm' || true))
-
-BIN_S_SOURCES := $(BIN_S_PLAIN_SOURCES) $(BIN_S_FLAGGED_SOURCES)
-BIN_ASM_SOURCES := $(BIN_ASM_PLAIN_SOURCES) $(BIN_ASM_FLAGGED_SOURCES)
-
-LIB_S_SOURCES := $(LIB_S_PLAIN_SOURCES) $(LIB_S_FLAGGED_SOURCES)
-LIB_ASM_SOURCES := $(LIB_ASM_PLAIN_SOURCES) $(LIB_ASM_FLAGGED_SOURCES)
 
 # ------------------------------------
 # Object file lists
 # ------------------------------------
 
-LIB_SOURCES := $(LIB_CPP_SOURCES) $(LIB_C_SOURCES) $(LIB_S_SOURCES) $(LIB_ASM_SOURCES)
+define define_abi_objects
+BIN_S_FLAGGED_SOURCES_$1 := $(wildcard $(BIN_DIR)/*.$1.S)
+BIN_S_PLAIN_SOURCES_$1 := $(filter-out $(call flagged_to_plain,$$(BIN_S_FLAGGED_SOURCES_$1)),$(wildcard $(BIN_DIR)/*.S))
 
-BIN_OBJECTS := $(foreach f,$(BIN_SOURCES),$(call src_to_obj,$(f)))
-BIN_OBJECTS += $(foreach f,$(BIN_S_SOURCES),$(call src_to_obj,$(f)))
-BIN_OBJECTS += $(foreach f,$(BIN_ASM_SOURCES),$(call src_to_obj,$(f)))
+BIN_ASM_FLAGGED_SOURCES_$1 := $(wildcard $(BIN_DIR)/*.$1.asm)
+BIN_ASM_PLAIN_SOURCES_$1 := $(filter-out $(call flagged_to_plain,$$(BIN_ASM_FLAGGED_SOURCES_$1)),$(wildcard $(BIN_DIR)/*.asm))
 
-LIB_CPP_OBJECTS := $(foreach f,$(LIB_CPP_SOURCES),$(call src_to_obj,$(f)))
-LIB_C_OBJECTS := $(foreach f,$(LIB_C_SOURCES),$(call src_to_obj,$(f)))
-LIB_S_OBJECTS := $(foreach f,$(LIB_S_SOURCES),$(call src_to_obj,$(f)))
-LIB_ASM_OBJECTS := $(foreach f,$(LIB_ASM_SOURCES),$(call src_to_obj,$(f)))
+LIB_S_FLAGGED_SOURCES_$1 := $(shell [ -d "$(LIB_DIR)" ] && find "$(LIB_DIR)" -type f -name '*.$1.S' || true)
+LIB_S_PLAIN_SOURCES_$1 := $(filter-out $(call flagged_to_plain,$$(LIB_S_FLAGGED_SOURCES_$1)),$(shell [ -d "$(LIB_DIR)" ] && find "$(LIB_DIR)" -type f -name '*.S' || true))
 
-LIB_CPP_PIC_OBJECTS := $(foreach f,$(LIB_CPP_SOURCES),$(call src_to_pic_obj,$(f)))
-LIB_C_PIC_OBJECTS := $(foreach f,$(LIB_C_SOURCES),$(call src_to_pic_obj,$(f)))
-LIB_S_PIC_OBJECTS := $(foreach f,$(LIB_S_SOURCES),$(call src_to_pic_obj,$(f)))
-LIB_ASM_PIC_OBJECTS := $(foreach f,$(LIB_ASM_SOURCES),$(call src_to_pic_obj,$(f)))
+LIB_ASM_FLAGGED_SOURCES_$1 := $(shell [ -d "$(LIB_DIR)" ] && find "$(LIB_DIR)" -type f -name '*.$1.asm' || true)
+LIB_ASM_PLAIN_SOURCES_$1 := $(filter-out $(call flagged_to_plain,$$(LIB_ASM_FLAGGED_SOURCES_$1)),$(shell [ -d "$(LIB_DIR)" ] && find "$(LIB_DIR)" -type f -name '*.asm' || true))
 
-LIB_OBJECTS := $(LIB_CPP_OBJECTS) $(LIB_C_OBJECTS) $(LIB_S_OBJECTS) $(LIB_ASM_OBJECTS)
-LIB_PIC_OBJECTS := $(LIB_CPP_PIC_OBJECTS) $(LIB_C_PIC_OBJECTS) $(LIB_S_PIC_OBJECTS) $(LIB_ASM_PIC_OBJECTS)
-ALL_OBJECTS := $(BIN_OBJECTS) $(LIB_OBJECTS) $(LIB_PIC_OBJECTS)
+BIN_S_SOURCES_$1 := $$(BIN_S_PLAIN_SOURCES_$1) $$(BIN_S_FLAGGED_SOURCES_$1)
+BIN_ASM_SOURCES_$1 := $$(BIN_ASM_PLAIN_SOURCES_$1) $$(BIN_ASM_FLAGGED_SOURCES_$1)
+
+LIB_S_SOURCES_$1 := $$(LIB_S_PLAIN_SOURCES_$1) $$(LIB_S_FLAGGED_SOURCES_$1)
+LIB_ASM_SOURCES_$1 := $$(LIB_ASM_PLAIN_SOURCES_$1) $$(LIB_ASM_FLAGGED_SOURCES_$1)
+
+LIB_SOURCES_$1 := $(LIB_CPP_SOURCES) $(LIB_C_SOURCES) $$(LIB_S_SOURCES_$1) $$(LIB_ASM_SOURCES_$1)
+
+BIN_OBJECTS_$1 := $(foreach f,$(BIN_SOURCES),$(call src_to_obj,$1,$(f)))
+BIN_OBJECTS_$1 += $(foreach f,$$(BIN_S_SOURCES_$1),$(call src_to_obj,$1,$(f)))
+BIN_OBJECTS_$1 += $(foreach f,$$(BIN_ASM_SOURCES_$1),$(call src_to_obj,$1,$(f)))
+
+LIB_CPP_OBJECTS_$1 := $(foreach f,$(LIB_CPP_SOURCES),$(call src_to_obj,$1,$(f)))
+LIB_C_OBJECTS_$1 := $(foreach f,$(LIB_C_SOURCES),$(call src_to_obj,$1,$(f)))
+LIB_S_OBJECTS_$1 := $(foreach f,$$(LIB_S_SOURCES_$1),$(call src_to_obj,$1,$(f)))
+LIB_ASM_OBJECTS_$1 := $(foreach f,$$(LIB_ASM_SOURCES_$1),$(call src_to_obj,$1,$(f)))
+
+LIB_CPP_PIC_OBJECTS_$1 := $(foreach f,$(LIB_CPP_SOURCES),$(call src_to_pic_obj,$1,$(f)))
+LIB_C_PIC_OBJECTS_$1 := $(foreach f,$(LIB_C_SOURCES),$(call src_to_pic_obj,$1,$(f)))
+LIB_S_PIC_OBJECTS_$1 := $(foreach f,$$(LIB_S_SOURCES_$1),$(call src_to_pic_obj,$1,$(f)))
+LIB_ASM_PIC_OBJECTS_$1 := $(foreach f,$$(LIB_ASM_SOURCES_$1),$(call src_to_pic_obj,$1,$(f)))
+
+LIB_OBJECTS_$1 := $$(LIB_CPP_OBJECTS_$1) $$(LIB_C_OBJECTS_$1) $$(LIB_S_OBJECTS_$1) $$(LIB_ASM_OBJECTS_$1)
+LIB_PIC_OBJECTS_$1 := $$(LIB_CPP_PIC_OBJECTS_$1) $$(LIB_C_PIC_OBJECTS_$1) $$(LIB_S_PIC_OBJECTS_$1) $$(LIB_ASM_PIC_OBJECTS_$1)
+ALL_OBJECTS_$1 := $$(BIN_OBJECTS_$1) $$(LIB_OBJECTS_$1) $$(LIB_PIC_OBJECTS_$1)
+endef
+
+$(foreach abi,$(BUILD_ABIS),$(eval $(call define_abi_objects,$(abi))))
+
+EXE_TARGETS := $(foreach abi,$(BUILD_ABIS),exe-$(abi))
+STATIC_TARGETS := $(foreach abi,$(BUILD_ABIS),static-$(abi))
+SHARED_TARGETS := $(foreach abi,$(BUILD_ABIS),shared-$(abi))
+ABI_TARGETS := $(EXE_TARGETS) $(STATIC_TARGETS) $(SHARED_TARGETS)
+EXEC_OUTS := $(foreach abi,$(BUILD_ABIS),$(EXEC_OUT_$(abi)))
+STATIC_OUTS := $(foreach abi,$(BUILD_ABIS),$(STATIC_OUT_$(abi)))
+SHARED_OUTS := $(foreach abi,$(BUILD_ABIS),$(SHARED_OUT_$(abi)))
+ALL_OBJECTS := $(foreach abi,$(BUILD_ABIS),$(ALL_OBJECTS_$(abi)))
 
 # -----------------------------------
 # Verbose mode
@@ -214,149 +284,136 @@ MAKEFLAGS += --no-print-directory
 # Compilation rules
 # -----------------------------------
 
+define define_abi_rules
 # C++ sources in src/bin (no PIC)
-$(OBJ_DIR)/bin/%.o: $(BIN_DIR)/%.cpp
-	$(Q)mkdir -p $(dir $@)
-	$(Q)echo "C++ (bin): $<"
-	$(Q)$(CXX) $(CPPFLAGS) $(CXXFLAGS) -MT $@ -MF $(@:.o=.d) -c $< -o $@
+$$(call abi_obj_dir,$1)/bin/%.o: $$(BIN_DIR)/%.cpp
+	$$(Q)mkdir -p $$(dir $$@)
+	$$(Q)echo "C++ (bin, $1): $$<"
+	$$(Q)$$(CXX) $$(CPPFLAGS) $$(CXXFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
-# Assembly sources in src/bin (.m32.S files, preprocessed)
-$(OBJ_DIR)/bin/%.o: $(BIN_DIR)/%.m32.S
-	$(Q)mkdir -p $(dir $@)
-	$(Q)echo "ASM (.S, bin, m32): $<"
-	$(Q)$(CXX) $(CPPFLAGS) $(SFLAGS_M32) -m32 -MT $@ -MF $(@:.o=.d) -c $< -o $@
-
-# Assembly sources in src/bin (.m64.S files, preprocessed)
-$(OBJ_DIR)/bin/%.o: $(BIN_DIR)/%.m64.S
-	$(Q)mkdir -p $(dir $@)
-	$(Q)echo "ASM (.S, bin, m64): $<"
-	$(Q)$(CXX) $(CPPFLAGS) $(SFLAGS_M64) -m64 -MT $@ -MF $(@:.o=.d) -c $< -o $@
+# Assembly sources in src/bin (.$1.S files, preprocessed)
+$$(call abi_obj_dir,$1)/bin/%.o: $$(BIN_DIR)/%.$1.S
+	$$(Q)mkdir -p $$(dir $$@)
+	$$(Q)echo "ASM (.S, bin, $1): $$<"
+	$$(Q)$$(CXX) $$(CPPFLAGS) $$(SFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # Assembly sources in src/bin (.S files, preprocessed)
-$(OBJ_DIR)/bin/%.o: $(BIN_DIR)/%.S
-	$(Q)mkdir -p $(dir $@)
-	$(Q)echo "ASM (.S, bin): $<"
-	$(Q)$(CXX) $(CPPFLAGS) $(SFLAGS) -MT $@ -MF $(@:.o=.d) -c $< -o $@
+$$(call abi_obj_dir,$1)/bin/%.o: $$(BIN_DIR)/%.S
+	$$(Q)mkdir -p $$(dir $$@)
+	$$(Q)echo "ASM (.S, bin, $1): $$<"
+	$$(Q)$$(CXX) $$(CPPFLAGS) $$(SFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
-# Assembly sources in src/bin (.m32.asm files, preprocessed)
-$(OBJ_DIR)/bin/%.o: $(BIN_DIR)/%.m32.asm
-	$(Q)mkdir -p $(dir $@)
-	$(Q)echo "ASM (.asm, bin, m32): $<"
-	$(Q)$(CXX) $(CPPFLAGS) $(ASMFLAGS_M32) -m32 -x assembler-with-cpp -MT $@ -MF $(@:.o=.d) -c $< -o $@
-
-# Assembly sources in src/bin (.m64.asm files, preprocessed)
-$(OBJ_DIR)/bin/%.o: $(BIN_DIR)/%.m64.asm
-	$(Q)mkdir -p $(dir $@)
-	$(Q)echo "ASM (.asm, bin, m64): $<"
-	$(Q)$(CXX) $(CPPFLAGS) $(ASMFLAGS_M64) -m64 -x assembler-with-cpp -MT $@ -MF $(@:.o=.d) -c $< -o $@
+# Assembly sources in src/bin (.$1.asm files, preprocessed)
+$$(call abi_obj_dir,$1)/bin/%.o: $$(BIN_DIR)/%.$1.asm
+	$$(Q)mkdir -p $$(dir $$@)
+	$$(Q)echo "ASM (.asm, bin, $1): $$<"
+	$$(Q)$$(CXX) $$(CPPFLAGS) $$(ASMFLAGS_$1) $$(ARCHFLAGS_$1) -x assembler-with-cpp -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # Assembly sources in src/bin (.asm files, preprocessed)
-$(OBJ_DIR)/bin/%.o: $(BIN_DIR)/%.asm
-	$(Q)mkdir -p $(dir $@)
-	$(Q)echo "ASM (.asm, bin): $<"
-	$(Q)$(CXX) $(CPPFLAGS) $(ASMFLAGS) -x assembler-with-cpp -MT $@ -MF $(@:.o=.d) -c $< -o $@
+$$(call abi_obj_dir,$1)/bin/%.o: $$(BIN_DIR)/%.asm
+	$$(Q)mkdir -p $$(dir $$@)
+	$$(Q)echo "ASM (.asm, bin, $1): $$<"
+	$$(Q)$$(CXX) $$(CPPFLAGS) $$(ASMFLAGS_$1) $$(ARCHFLAGS_$1) -x assembler-with-cpp -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # C++ sources in src/lib
-$(OBJ_DIR)/lib/%.o: $(LIB_DIR)/%.cpp
-	$(Q)mkdir -p $(dir $@)
-	$(Q)echo "C++ (lib): $<"
-	$(Q)$(CXX) -I$(INC_DIR)/$(dir $*) $(CPPFLAGS) $(CXXFLAGS) -MT $@ -MF $(@:.o=.d) -c $< -o $@
+$$(call abi_obj_dir,$1)/lib/%.o: $$(LIB_DIR)/%.cpp
+	$$(Q)mkdir -p $$(dir $$@)
+	$$(Q)echo "C++ (lib, $1): $$<"
+	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS) $$(CXXFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # C sources in src/lib
-$(OBJ_DIR)/lib/%.o: $(LIB_DIR)/%.c
-	$(Q)mkdir -p $(dir $@)
-	$(Q)echo "C (lib): $<"
-	$(Q)$(CXX) -I$(INC_DIR)/$(dir $*) $(CPPFLAGS) -x c -MT $@ -MF $(@:.o=.d) -c $< -o $@
+$$(call abi_obj_dir,$1)/lib/%.o: $$(LIB_DIR)/%.c
+	$$(Q)mkdir -p $$(dir $$@)
+	$$(Q)echo "C (lib, $1): $$<"
+	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS) $$(ARCHFLAGS_$1) -x c -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # C++ sources in src/lib compiled with PIC for shared library target
-$(OBJ_DIR)/lib/%.pic.o: $(LIB_DIR)/%.cpp
-	$(Q)mkdir -p $(dir $@)
-	$(Q)echo "C++ (lib,pic): $<"
-	$(Q)$(CXX) -I$(INC_DIR)/$(dir $*) $(CPPFLAGS) $(CXXFLAGS) -fPIC -MT $@ -MF $(@:.o=.d) -c $< -o $@
+$$(call abi_obj_dir,$1)/lib/%.pic.o: $$(LIB_DIR)/%.cpp
+	$$(Q)mkdir -p $$(dir $$@)
+	$$(Q)echo "C++ (lib,pic,$1): $$<"
+	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS) $$(CXXFLAGS_$1) $$(ARCHFLAGS_$1) -fPIC -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # C sources in src/lib compiled with PIC for shared library target
-$(OBJ_DIR)/lib/%.pic.o: $(LIB_DIR)/%.c
-	$(Q)mkdir -p $(dir $@)
-	$(Q)echo "C (lib,pic): $<"
-	$(Q)$(CXX) -I$(INC_DIR)/$(dir $*) $(CPPFLAGS) -fPIC -x c -MT $@ -MF $(@:.o=.d) -c $< -o $@
+$$(call abi_obj_dir,$1)/lib/%.pic.o: $$(LIB_DIR)/%.c
+	$$(Q)mkdir -p $$(dir $$@)
+	$$(Q)echo "C (lib,pic,$1): $$<"
+	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS) $$(ARCHFLAGS_$1) -fPIC -x c -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
-# Assembly sources in src/lib (.m32.S files, preprocessed)
-$(OBJ_DIR)/lib/%.o: $(LIB_DIR)/%.m32.S
-	$(Q)mkdir -p $(dir $@)
-	$(Q)echo "ASM (.S, m32): $<"
-	$(Q)$(CXX) -I$(INC_DIR)/$(dir $*) $(CPPFLAGS) $(SFLAGS_M32) -m32 -MT $@ -MF $(@:.o=.d) -c $< -o $@
-
-# Assembly sources in src/lib (.m64.S files, preprocessed)
-$(OBJ_DIR)/lib/%.o: $(LIB_DIR)/%.m64.S
-	$(Q)mkdir -p $(dir $@)
-	$(Q)echo "ASM (.S, m64): $<"
-	$(Q)$(CXX) -I$(INC_DIR)/$(dir $*) $(CPPFLAGS) $(SFLAGS_M64) -m64 -MT $@ -MF $(@:.o=.d) -c $< -o $@
+# Assembly sources in src/lib (.$1.S files, preprocessed)
+$$(call abi_obj_dir,$1)/lib/%.o: $$(LIB_DIR)/%.$1.S
+	$$(Q)mkdir -p $$(dir $$@)
+	$$(Q)echo "ASM (.S, $1): $$<"
+	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS) $$(SFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # Assembly sources in src/lib (.S files, preprocessed)
-$(OBJ_DIR)/lib/%.o: $(LIB_DIR)/%.S
-	$(Q)mkdir -p $(dir $@)
-	$(Q)echo "ASM (.S): $<"
-	$(Q)$(CXX) -I$(INC_DIR)/$(dir $*) $(CPPFLAGS) $(SFLAGS) -MT $@ -MF $(@:.o=.d) -c $< -o $@
+$$(call abi_obj_dir,$1)/lib/%.o: $$(LIB_DIR)/%.S
+	$$(Q)mkdir -p $$(dir $$@)
+	$$(Q)echo "ASM (.S, $1): $$<"
+	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS) $$(SFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
-# Assembly sources in src/lib (.m32.S files, preprocessed) compiled with PIC
-$(OBJ_DIR)/lib/%.pic.o: $(LIB_DIR)/%.m32.S
-	$(Q)mkdir -p $(dir $@)
-	$(Q)echo "ASM (.S, pic, m32): $<"
-	$(Q)$(CXX) -I$(INC_DIR)/$(dir $*) $(CPPFLAGS) $(S_PICFLAGS_M32) -m32 -MT $@ -MF $(@:.o=.d) -c $< -o $@
-
-# Assembly sources in src/lib (.m64.S files, preprocessed) compiled with PIC
-$(OBJ_DIR)/lib/%.pic.o: $(LIB_DIR)/%.m64.S
-	$(Q)mkdir -p $(dir $@)
-	$(Q)echo "ASM (.S, pic, m64): $<"
-	$(Q)$(CXX) -I$(INC_DIR)/$(dir $*) $(CPPFLAGS) $(S_PICFLAGS_M64) -m64 -MT $@ -MF $(@:.o=.d) -c $< -o $@
+# Assembly sources in src/lib (.$1.S files, preprocessed) compiled with PIC
+$$(call abi_obj_dir,$1)/lib/%.pic.o: $$(LIB_DIR)/%.$1.S
+	$$(Q)mkdir -p $$(dir $$@)
+	$$(Q)echo "ASM (.S, pic, $1): $$<"
+	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS) $$(S_PICFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # Assembly sources in src/lib (.S files, preprocessed) compiled with PIC
-$(OBJ_DIR)/lib/%.pic.o: $(LIB_DIR)/%.S
-	$(Q)mkdir -p $(dir $@)
-	$(Q)echo "ASM (.S, pic): $<"
-	$(Q)$(CXX) -I$(INC_DIR)/$(dir $*) $(CPPFLAGS) $(S_PICFLAGS) -MT $@ -MF $(@:.o=.d) -c $< -o $@
+$$(call abi_obj_dir,$1)/lib/%.pic.o: $$(LIB_DIR)/%.S
+	$$(Q)mkdir -p $$(dir $$@)
+	$$(Q)echo "ASM (.S, pic, $1): $$<"
+	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS) $$(S_PICFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
-# Assembly sources in src/lib (.m32.asm files, preprocessed)
-$(OBJ_DIR)/lib/%.o: $(LIB_DIR)/%.m32.asm
-	$(Q)mkdir -p $(dir $@)
-	$(Q)echo "ASM (.asm, m32): $<"
-	$(Q)$(CXX) -I$(INC_DIR)/$(dir $*) $(CPPFLAGS) $(ASMFLAGS_M32) -m32 -x assembler-with-cpp -MT $@ -MF $(@:.o=.d) -c $< -o $@
-
-# Assembly sources in src/lib (.m64.asm files, preprocessed)
-$(OBJ_DIR)/lib/%.o: $(LIB_DIR)/%.m64.asm
-	$(Q)mkdir -p $(dir $@)
-	$(Q)echo "ASM (.asm, m64): $<"
-	$(Q)$(CXX) -I$(INC_DIR)/$(dir $*) $(CPPFLAGS) $(ASMFLAGS_M64) -m64 -x assembler-with-cpp -MT $@ -MF $(@:.o=.d) -c $< -o $@
+# Assembly sources in src/lib (.$1.asm files, preprocessed)
+$$(call abi_obj_dir,$1)/lib/%.o: $$(LIB_DIR)/%.$1.asm
+	$$(Q)mkdir -p $$(dir $$@)
+	$$(Q)echo "ASM (.asm, $1): $$<"
+	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS) $$(ASMFLAGS_$1) $$(ARCHFLAGS_$1) -x assembler-with-cpp -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # Assembly sources in src/lib (.asm files, raw assembly)
-$(OBJ_DIR)/lib/%.o: $(LIB_DIR)/%.asm
-	$(Q)mkdir -p $(dir $@)
-	$(Q)echo "ASM (.asm): $<"
-	$(Q)$(CXX) -I$(INC_DIR)/$(dir $*) $(CPPFLAGS) $(ASMFLAGS) -x assembler-with-cpp -MT $@ -MF $(@:.o=.d) -c $< -o $@
+$$(call abi_obj_dir,$1)/lib/%.o: $$(LIB_DIR)/%.asm
+	$$(Q)mkdir -p $$(dir $$@)
+	$$(Q)echo "ASM (.asm, $1): $$<"
+	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS) $$(ASMFLAGS_$1) $$(ARCHFLAGS_$1) -x assembler-with-cpp -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
-# Assembly sources in src/lib (.m32.asm files, preprocessed) compiled with PIC
-$(OBJ_DIR)/lib/%.pic.o: $(LIB_DIR)/%.m32.asm
-	$(Q)mkdir -p $(dir $@)
-	$(Q)echo "ASM (.asm, pic, m32): $<"
-	$(Q)$(CXX) -I$(INC_DIR)/$(dir $*) $(CPPFLAGS) $(ASM_PICFLAGS_M32) -m32 -x assembler-with-cpp -MT $@ -MF $(@:.o=.d) -c $< -o $@
-
-# Assembly sources in src/lib (.m64.asm files, preprocessed) compiled with PIC
-$(OBJ_DIR)/lib/%.pic.o: $(LIB_DIR)/%.m64.asm
-	$(Q)mkdir -p $(dir $@)
-	$(Q)echo "ASM (.asm, pic, m64): $<"
-	$(Q)$(CXX) -I$(INC_DIR)/$(dir $*) $(CPPFLAGS) $(ASM_PICFLAGS_M64) -m64 -x assembler-with-cpp -MT $@ -MF $(@:.o=.d) -c $< -o $@
+# Assembly sources in src/lib (.$1.asm files, preprocessed) compiled with PIC
+$$(call abi_obj_dir,$1)/lib/%.pic.o: $$(LIB_DIR)/%.$1.asm
+	$$(Q)mkdir -p $$(dir $$@)
+	$$(Q)echo "ASM (.asm, pic, $1): $$<"
+	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS) $$(ASM_PICFLAGS_$1) $$(ARCHFLAGS_$1) -x assembler-with-cpp -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # Assembly sources in src/lib (.asm files, raw assembly) compiled with PIC
-$(OBJ_DIR)/lib/%.pic.o: $(LIB_DIR)/%.asm
-	$(Q)mkdir -p $(dir $@)
-	$(Q)echo "ASM (.asm, pic): $<"
-	$(Q)$(CXX) -I$(INC_DIR)/$(dir $*) $(CPPFLAGS) $(ASM_PICFLAGS) -x assembler-with-cpp -MT $@ -MF $(@:.o=.d) -c $< -o $@
+$$(call abi_obj_dir,$1)/lib/%.pic.o: $$(LIB_DIR)/%.asm
+	$$(Q)mkdir -p $$(dir $$@)
+	$$(Q)echo "ASM (.asm, pic, $1): $$<"
+	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS) $$(ASM_PICFLAGS_$1) $$(ARCHFLAGS_$1) -x assembler-with-cpp -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
-# -----------------------------------
-# Output directory
-# -----------------------------------
-$(OUT_DIR):
-	$(Q)mkdir -p $(OUT_DIR)
+.PHONY: exe-$1
+exe-$1: dep-incmap $$(EXEC_OUT_$1)
+
+$$(EXEC_OUT_$1): $$(BIN_OBJECTS_$1) $$(LIB_OBJECTS_$1)
+	$$(Q)mkdir -p $$(dir $$@)
+	$$(Q)echo "Link (exe, $1): $$@"
+	$$(Q)$$(EXE_LINKER) $$(LDFLAGS_$1) $$(ARCHFLAGS_$1) -o $$@ $$^ $$(LDLIBS)
+
+.PHONY: static-$1
+static-$1: dep-incmap $$(STATIC_OUT_$1)
+
+$$(STATIC_OUT_$1): $$(LIB_OBJECTS_$1)
+	$$(Q)mkdir -p $$(dir $$@)
+	$$(Q)echo "Archive (static, $1): $$@"
+	$$(Q)rm -f $$@
+	$$(Q)$$(AR) rcs $$@ $$^
+
+.PHONY: shared-$1
+shared-$1: dep-incmap $$(SHARED_OUT_$1)
+
+$$(SHARED_OUT_$1): $$(LIB_PIC_OBJECTS_$1)
+	$$(Q)mkdir -p $$(dir $$@)
+	$$(Q)echo "Link (shared, $1): $$@"
+	$$(Q)$$(SHARED_LINKER) -shared $$(LDFLAGS_$1) $$(ARCHFLAGS_$1) -o $$@ $$^ $$(LDLIBS)
+endef
+
+$(foreach abi,$(BUILD_ABIS),$(eval $(call define_abi_rules,$(abi))))
 
 # -----------------------------------
 # Executable
@@ -365,32 +422,17 @@ $(OUT_DIR):
 
 all: dep-incmap $(BUILD_TARGETS)
 
-exe: dep-incmap $(EXEC_OUT)
-
-$(EXEC_OUT): $(BIN_OBJECTS) $(LIB_OBJECTS) | $(OUT_DIR)
-	$(Q)mkdir -p $(dir $@)
-	$(Q)echo "Link (exe): $@"
-	$(Q)$(EXE_LINKER) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+exe: $(EXE_TARGETS)
 
 # -----------------------------------
 # Static library
 # -----------------------------------
-static: dep-incmap $(STATIC_OUT)
-
-$(STATIC_OUT): $(LIB_OBJECTS) | $(OUT_DIR)
-	$(Q)echo "Archive (static): $@"
-	$(Q)rm -f $@
-	$(Q)$(AR) rcs $@ $^
+static: $(STATIC_TARGETS)
 
 # -----------------------------------
 # Shared library
 # -----------------------------------
-shared: dep-incmap $(SHARED_OUT)
-
-$(SHARED_OUT): $(LIB_PIC_OBJECTS) | $(OUT_DIR)
-	$(Q)mkdir -p $(dir $@)
-	$(Q)echo "Link (shared): $@"
-	$(Q)$(SHARED_LINKER) -shared $(LDFLAGS) -o $@ $^ $(LDLIBS)
+shared: $(SHARED_TARGETS)
 
 # -----------------------------------
 # Auto dependencies
@@ -404,10 +446,16 @@ DEPS := $(ALL_OBJECTS:.o=.d)
 .PHONY: help
 help:
 	@echo "Targets:"
-	@echo "  all        Build enabled targets (BUILD_EXE/STATIC/SHARED)"
-	@echo "  exe        Build executable"
-	@echo "  static     Build static library"
-	@echo "  shared     Build shared library"
+	@echo "  all        Build enabled target/ABI combinations"
+	@echo "  exe        Build executable for enabled ABIs"
+	@echo "  static     Build static library for enabled ABIs"
+	@echo "  shared     Build shared library for enabled ABIs"
+	@echo "  exe-m32    Build 32-bit executable (with BUILD_M32=1)"
+	@echo "  exe-m64    Build 64-bit executable (with BUILD_M64=1)"
+	@echo "  static-m32 Build 32-bit static library (with BUILD_M32=1)"
+	@echo "  static-m64 Build 64-bit static library (with BUILD_M64=1)"
+	@echo "  shared-m32 Build 32-bit shared library (with BUILD_M32=1)"
+	@echo "  shared-m64 Build 64-bit shared library (with BUILD_M64=1)"
 	@echo "  tests      Run unit + system tests (if present)"
 	@echo "  ut         Run unit tests"
 	@echo "  sy         Run system tests"
@@ -416,6 +464,8 @@ help:
 	@echo ""
 	@echo "Options:"
 	@echo "  MODE=debug|release"
+	@echo "  BUILD_M32=0|1        Enable 32-bit build graph (default: 0)"
+	@echo "  BUILD_M64=0|1        Enable 64-bit build graph (default: 1)"
 	@echo "  VERBOSE=1"
 	@echo "  FILTER=<substring>   Filter tests by name (e.g. make tests FILTER=math)"
 
@@ -493,4 +543,4 @@ clean: clean-all clean-tests
 
 distclean: clean
 
-.PHONY: all exe static shared tests ut sy dep-incmap clean clean-all clean-tests distclean
+.PHONY: all exe static shared $(ABI_TARGETS) tests ut sy dep-incmap clean clean-all clean-tests distclean
