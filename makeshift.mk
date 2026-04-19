@@ -30,19 +30,25 @@ INC_SUBDIRS := $(shell find $(INC_DIR) -type d 2>/dev/null)
 INC_SUBDIR_FLAGS := $(foreach dir,$(INC_SUBDIRS),-I$(dir))
 OBJ_DIR := $(SRC_DIR)/bld
 OUT_DIR := bld
-abi_obj_dir = $(OBJ_DIR)/$(1)
-abi_out_dir = $(OUT_DIR)/$(1)
+profile_obj_dir = $(OBJ_DIR)/$(1)
+profile_out_dir = $(OUT_DIR)/$(1)
 
-TST_DIR := $(SRC_DIR)/tst
-TST_UT_DIR := $(TST_DIR)/ut
-TST_SY_DIR := $(TST_DIR)/sy
+# Prefer the sibling test tree while keeping src/tst/ut working for older
+# projects. During migration, accept either tst/makefile or tst/ut/makefile.
+TST_DIR := tst
+LEGACY_TST_DIR := $(SRC_DIR)/tst
+test_makefile = $(wildcard $(1)/Makefile $(1)/makefile)
+TST_UT_DIRS := $(TST_DIR) $(TST_DIR)/ut $(LEGACY_TST_DIR)/ut
+DETECTED_TST_UT_DIR := $(firstword $(foreach dir,$(TST_UT_DIRS),$(if $(call test_makefile,$(dir)),$(dir))))
+TST_UT_DIR := $(if $(DETECTED_TST_UT_DIR),$(DETECTED_TST_UT_DIR),$(LEGACY_TST_DIR)/ut)
+TST_SY_DIR := $(if $(wildcard $(TST_DIR)/sy),$(TST_DIR)/sy,$(LEGACY_TST_DIR)/sy)
 
 # -----------------------------------
 # Dependency include scanning (dep/*)
 # -----------------------------------
 DEP_ROOT := dep
 DEP_ROOT_ABS := $(abspath $(DEP_ROOT))
-# Keep the dependency include map shared across ABI variants; the
+# Keep the dependency include map shared across build profiles; the
 # symlinked include tree itself is architecture-neutral.
 DEP_MAP_DIR := $(OBJ_DIR)/depinc
 DEP_NAMES := $(shell [ -d "$(DEP_ROOT)" ] && for p in "$(DEP_ROOT)"/*; do [ -d "$$p" ] && basename "$$p"; done || true)
@@ -66,21 +72,23 @@ FILTER ?= $(filter)
 # Assembly mode override helpers
 # -----------------------------------
 
-# Strip an optional .m32 / .m64 marker that appears immediately before
-# the source extension, so:
-#   foo.m32.S   -> foo.S
-#   foo.m64.asm -> foo.asm
-strip_asm_mode_marker = $(patsubst %.m32.S,%.S,$(patsubst %.m64.S,%.S,$(patsubst %.m32.asm,%.asm,$(patsubst %.m64.asm,%.asm,$(1)))))
+# Strip an optional .<profile> marker that appears immediately before the
+# source extension, so:
+#   foo.kernel.S -> foo.S
+#   foo.user.asm -> foo.asm
+strip_one_profile_marker = $(if $(filter %.$(2),$(basename $(1))),$(basename $(basename $(1)))$(suffix $(1)),$(1))
+strip_profile_markers_impl = $(if $(strip $(1)),$(call strip_profile_markers_impl,$(wordlist 2,$(words $(1)),$(1)),$(call strip_one_profile_marker,$(2),$(firstword $(1)))),$(2))
+strip_profile_marker = $(call strip_profile_markers_impl,$(ACTIVE_PROFILES),$(1))
 
-# Convert a source path under src/ to its ABI-specific object path under
-# src/bld/<abi>/, while also stripping the optional mode marker from the
-# basename.
-src_to_obj = $(patsubst $(SRC_DIR)/%.cpp,$(call abi_obj_dir,$(1))/%.o,$(patsubst $(SRC_DIR)/%.c,$(call abi_obj_dir,$(1))/%.o,$(patsubst $(SRC_DIR)/%.S,$(call abi_obj_dir,$(1))/%.o,$(patsubst $(SRC_DIR)/%.asm,$(call abi_obj_dir,$(1))/%.o,$(call strip_asm_mode_marker,$(2))))))
-src_to_pic_obj = $(patsubst $(SRC_DIR)/%.cpp,$(call abi_obj_dir,$(1))/%.pic.o,$(patsubst $(SRC_DIR)/%.c,$(call abi_obj_dir,$(1))/%.pic.o,$(patsubst $(SRC_DIR)/%.S,$(call abi_obj_dir,$(1))/%.pic.o,$(patsubst $(SRC_DIR)/%.asm,$(call abi_obj_dir,$(1))/%.pic.o,$(call strip_asm_mode_marker,$(2))))))
+# Convert a source path under src/ to its profile-specific object path under
+# src/bld/<profile>/, while also stripping the optional profile marker from
+# the basename.
+src_to_obj = $(patsubst $(SRC_DIR)/%.cpp,$(call profile_obj_dir,$(1))/%.o,$(patsubst $(SRC_DIR)/%.c,$(call profile_obj_dir,$(1))/%.o,$(patsubst $(SRC_DIR)/%.S,$(call profile_obj_dir,$(1))/%.o,$(patsubst $(SRC_DIR)/%.asm,$(call profile_obj_dir,$(1))/%.o,$(call strip_profile_marker,$(2))))))
+src_to_pic_obj = $(patsubst $(SRC_DIR)/%.cpp,$(call profile_obj_dir,$(1))/%.pic.o,$(patsubst $(SRC_DIR)/%.c,$(call profile_obj_dir,$(1))/%.pic.o,$(patsubst $(SRC_DIR)/%.S,$(call profile_obj_dir,$(1))/%.pic.o,$(patsubst $(SRC_DIR)/%.asm,$(call profile_obj_dir,$(1))/%.pic.o,$(call strip_profile_marker,$(2))))))
 
-# Given a list of flagged sources, derive the matching plain source names
-# so they can be excluded from the normal source list.
-flagged_to_plain = $(foreach f,$(1),$(call strip_asm_mode_marker,$(f)))
+# Given a list of profile-flagged sources, derive the matching plain source
+# names so they can be excluded from the normal source list.
+flagged_to_plain = $(foreach f,$(1),$(call strip_profile_marker,$(f)))
 
 # -----------------------------------
 # Flags and options
@@ -111,106 +119,124 @@ S_PICFLAGS += $(USER_S_PICFLAGS)
 ASM_PICFLAGS += $(USER_ASM_PICFLAGS)
 
 # -----------------------------------
-# Architecture-specific flag filtering
+# Architecture-specific compatibility helpers
 # -----------------------------------
 
 arch_filter_m32 = $(filter-out -m64 -m32 -mcmodel=%,$(1))
 arch_filter_m64 = $(filter-out -m32 -m64,$(1))
 
-ARCHFLAGS_m32 := -m32
-ARCHFLAGS_m64 := -m64
+COMPAT_ARCHFLAGS_m32 := -m32
+COMPAT_ARCHFLAGS_m64 := -m64
 
 # Bare linkers such as ld/ld.lld do not accept compiler-style -m32/-m64
 # switches. Keep separate linker arch flags so projects that link via ld
 # can rely on explicit emulation flags in USER_LDFLAGS instead.
 is_ld_linker = $(strip $(filter ld ld.% %ld %ld.%,$(notdir $(1))))
-EXE_ARCHFLAGS_m32 ?= $(if $(call is_ld_linker,$(EXE_LINKER)),,$(ARCHFLAGS_m32))
-EXE_ARCHFLAGS_m64 ?= $(if $(call is_ld_linker,$(EXE_LINKER)),,$(ARCHFLAGS_m64))
-SHARED_ARCHFLAGS_m32 ?= $(if $(call is_ld_linker,$(SHARED_LINKER)),,$(ARCHFLAGS_m32))
-SHARED_ARCHFLAGS_m64 ?= $(if $(call is_ld_linker,$(SHARED_LINKER)),,$(ARCHFLAGS_m64))
-
-CXXFLAGS_m32 := $(call arch_filter_m32,$(CXXFLAGS))
-CXXFLAGS_m64 := $(call arch_filter_m64,$(CXXFLAGS))
-LDFLAGS_m32 := $(call arch_filter_m32,$(LDFLAGS))
-LDFLAGS_m64 := $(call arch_filter_m64,$(LDFLAGS))
-SFLAGS_m32 := $(call arch_filter_m32,$(SFLAGS))
-SFLAGS_m64 := $(call arch_filter_m64,$(SFLAGS))
-ASMFLAGS_m32 := $(call arch_filter_m32,$(ASMFLAGS))
-ASMFLAGS_m64 := $(call arch_filter_m64,$(ASMFLAGS))
-S_PICFLAGS_m32 := $(call arch_filter_m32,$(S_PICFLAGS))
-S_PICFLAGS_m64 := $(call arch_filter_m64,$(S_PICFLAGS))
-ASM_PICFLAGS_m32 := $(call arch_filter_m32,$(ASM_PICFLAGS))
-ASM_PICFLAGS_m64 := $(call arch_filter_m64,$(ASM_PICFLAGS))
+COMPAT_CXXFLAGS_m32 := $(call arch_filter_m32,$(CXXFLAGS))
+COMPAT_CXXFLAGS_m64 := $(call arch_filter_m64,$(CXXFLAGS))
+COMPAT_LDFLAGS_m32 := $(call arch_filter_m32,$(LDFLAGS))
+COMPAT_LDFLAGS_m64 := $(call arch_filter_m64,$(LDFLAGS))
+COMPAT_SFLAGS_m32 := $(call arch_filter_m32,$(SFLAGS))
+COMPAT_SFLAGS_m64 := $(call arch_filter_m64,$(SFLAGS))
+COMPAT_ASMFLAGS_m32 := $(call arch_filter_m32,$(ASMFLAGS))
+COMPAT_ASMFLAGS_m64 := $(call arch_filter_m64,$(ASMFLAGS))
+COMPAT_S_PICFLAGS_m32 := $(call arch_filter_m32,$(S_PICFLAGS))
+COMPAT_S_PICFLAGS_m64 := $(call arch_filter_m64,$(S_PICFLAGS))
+COMPAT_ASM_PICFLAGS_m32 := $(call arch_filter_m32,$(ASM_PICFLAGS))
+COMPAT_ASM_PICFLAGS_m64 := $(call arch_filter_m64,$(ASM_PICFLAGS))
 
 # -----------------------------------
-# ABI selection
+# Profile selection
 # -----------------------------------
+BUILD_PROFILES ?=
 BUILD_M32 ?= 0
 BUILD_M64 ?= 1
 
-BUILD_ABIS :=
+LEGACY_PROFILES :=
 
 ifeq ($(BUILD_M32),1)
-  BUILD_ABIS += m32
+  LEGACY_PROFILES += m32
 endif
 
 ifeq ($(BUILD_M64),1)
-  BUILD_ABIS += m64
+  LEGACY_PROFILES += m64
 endif
 
-ifeq ($(strip $(BUILD_ABIS)),)
-  $(warning No ABIs enabled (BUILD_M32/BUILD_M64 both 0))
+ACTIVE_PROFILES := $(strip $(if $(BUILD_PROFILES),$(BUILD_PROFILES),$(LEGACY_PROFILES)))
+
+ifeq ($(strip $(ACTIVE_PROFILES)),)
+  $(warning No build profiles enabled (set BUILD_PROFILES or BUILD_M32/BUILD_M64))
 endif
 
-SINGLE_ABI := $(if $(filter 1,$(words $(BUILD_ABIS))),$(firstword $(BUILD_ABIS)))
+SINGLE_PROFILE := $(if $(filter 1,$(words $(ACTIVE_PROFILES))),$(firstword $(ACTIVE_PROFILES)))
 
-default_exec_out = $(call abi_out_dir,$(1))/$(BIN_NAME)
-default_static_out = $(call abi_out_dir,$(1))/lib$(LIB_BASENAME).a
-default_shared_out = $(call abi_out_dir,$(1))/lib$(LIB_BASENAME).so
+default_exec_out = $(call profile_out_dir,$(1))/$(BIN_NAME)
+default_static_out = $(call profile_out_dir,$(1))/lib$(LIB_BASENAME).a
+default_shared_out = $(call profile_out_dir,$(1))/lib$(LIB_BASENAME).so
 
 ifneq ($(strip $(EXEC_OUT)),)
-ifneq ($(words $(BUILD_ABIS)),1)
-  $(warning EXEC_OUT is ignored when multiple ABIs are enabled; use EXEC_OUT_m32 / EXEC_OUT_m64)
+ifneq ($(words $(ACTIVE_PROFILES)),1)
+  $(warning EXEC_OUT is ignored when multiple profiles are enabled; use PROFILE_<name>_EXEC_OUT or EXEC_OUT_<name>)
 endif
 endif
 
 ifneq ($(strip $(STATIC_OUT)),)
-ifneq ($(words $(BUILD_ABIS)),1)
-  $(warning STATIC_OUT is ignored when multiple ABIs are enabled; use STATIC_OUT_m32 / STATIC_OUT_m64)
+ifneq ($(words $(ACTIVE_PROFILES)),1)
+  $(warning STATIC_OUT is ignored when multiple profiles are enabled; use PROFILE_<name>_STATIC_OUT or STATIC_OUT_<name>)
 endif
 endif
 
 ifneq ($(strip $(SHARED_OUT)),)
-ifneq ($(words $(BUILD_ABIS)),1)
-  $(warning SHARED_OUT is ignored when multiple ABIs are enabled; use SHARED_OUT_m32 / SHARED_OUT_m64)
+ifneq ($(words $(ACTIVE_PROFILES)),1)
+  $(warning SHARED_OUT is ignored when multiple profiles are enabled; use PROFILE_<name>_SHARED_OUT or SHARED_OUT_<name>)
 endif
 endif
 
-define init_abi_outputs
-EXEC_OUT_$1 ?= $(if $(and $(filter $1,$(SINGLE_ABI)),$(strip $(EXEC_OUT))),$(EXEC_OUT),$(call default_exec_out,$1))
-STATIC_OUT_$1 ?= $(if $(and $(filter $1,$(SINGLE_ABI)),$(strip $(STATIC_OUT))),$(STATIC_OUT),$(call default_static_out,$1))
-SHARED_OUT_$1 ?= $(if $(and $(filter $1,$(SINGLE_ABI)),$(strip $(SHARED_OUT))),$(SHARED_OUT),$(call default_shared_out,$1))
+detect_profile_arch_from_cxxflags = $(if $(filter -m32,$(2)),m32,$(if $(filter -m64,$(2)),m64,))
+resolved_profile_arch = $(strip $(if $(PROFILE_$1_ARCH),$(PROFILE_$1_ARCH),$(if $(filter m32 m64,$(1)),$(1),$(call detect_profile_arch_from_cxxflags,$(1),$(PROFILE_$1_CXXFLAGS)))))
+
+default_archflags_for_arch = $(if $(filter m32,$(1)),$(COMPAT_ARCHFLAGS_m32),$(if $(filter m64,$(1)),$(COMPAT_ARCHFLAGS_m64),))
+default_exe_archflags_for_arch = $(if $(filter m32,$(1)),$(if $(call is_ld_linker,$(2)),,$(COMPAT_ARCHFLAGS_m32)),$(if $(filter m64,$(1)),$(if $(call is_ld_linker,$(2)),,$(COMPAT_ARCHFLAGS_m64)),))
+default_shared_archflags_for_arch = $(if $(filter m32,$(1)),$(if $(call is_ld_linker,$(2)),,$(COMPAT_ARCHFLAGS_m32)),$(if $(filter m64,$(1)),$(if $(call is_ld_linker,$(2)),,$(COMPAT_ARCHFLAGS_m64)),))
+
+base_cxxflags_for_arch = $(if $(filter m32,$(1)),$(COMPAT_CXXFLAGS_m32),$(if $(filter m64,$(1)),$(COMPAT_CXXFLAGS_m64),$(CXXFLAGS)))
+base_ldflags_for_arch = $(if $(filter m32,$(1)),$(COMPAT_LDFLAGS_m32),$(if $(filter m64,$(1)),$(COMPAT_LDFLAGS_m64),$(LDFLAGS)))
+base_sflags_for_arch = $(if $(filter m32,$(1)),$(COMPAT_SFLAGS_m32),$(if $(filter m64,$(1)),$(COMPAT_SFLAGS_m64),$(SFLAGS)))
+base_asmflags_for_arch = $(if $(filter m32,$(1)),$(COMPAT_ASMFLAGS_m32),$(if $(filter m64,$(1)),$(COMPAT_ASMFLAGS_m64),$(ASMFLAGS)))
+base_s_picflags_for_arch = $(if $(filter m32,$(1)),$(COMPAT_S_PICFLAGS_m32),$(if $(filter m64,$(1)),$(COMPAT_S_PICFLAGS_m64),$(S_PICFLAGS)))
+base_asm_picflags_for_arch = $(if $(filter m32,$(1)),$(COMPAT_ASM_PICFLAGS_m32),$(if $(filter m64,$(1)),$(COMPAT_ASM_PICFLAGS_m64),$(ASM_PICFLAGS)))
+
+define init_profile
+PROFILE_ARCH_$1 := $(call resolved_profile_arch,$1)
+
+CPPFLAGS_$1 := $(CPPFLAGS) $(PROFILE_$1_CPPFLAGS)
+CXXFLAGS_$1 := $(call base_cxxflags_for_arch,$(call resolved_profile_arch,$1)) $(PROFILE_$1_CXXFLAGS)
+LDFLAGS_EXE_$1 := $(call base_ldflags_for_arch,$(call resolved_profile_arch,$1)) $(PROFILE_$1_LDFLAGS) $(PROFILE_$1_EXE_LDFLAGS)
+LDFLAGS_SHARED_$1 := $(call base_ldflags_for_arch,$(call resolved_profile_arch,$1)) $(PROFILE_$1_LDFLAGS) $(PROFILE_$1_SHARED_LDFLAGS)
+LDLIBS_EXE_$1 := $(LDLIBS) $(PROFILE_$1_LDLIBS) $(PROFILE_$1_EXE_LDLIBS)
+LDLIBS_SHARED_$1 := $(LDLIBS) $(PROFILE_$1_LDLIBS) $(PROFILE_$1_SHARED_LDLIBS)
+SFLAGS_$1 := $(call base_sflags_for_arch,$(call resolved_profile_arch,$1)) $(PROFILE_$1_SFLAGS)
+ASMFLAGS_$1 := $(call base_asmflags_for_arch,$(call resolved_profile_arch,$1)) $(PROFILE_$1_ASMFLAGS)
+S_PICFLAGS_$1 := $(call base_s_picflags_for_arch,$(call resolved_profile_arch,$1)) $(PROFILE_$1_S_PICFLAGS)
+ASM_PICFLAGS_$1 := $(call base_asm_picflags_for_arch,$(call resolved_profile_arch,$1)) $(PROFILE_$1_ASM_PICFLAGS)
+
+EXE_LINKER_$1 := $(if $(strip $(PROFILE_$1_EXE_LINKER)),$(PROFILE_$1_EXE_LINKER),$(EXE_LINKER))
+SHARED_LINKER_$1 := $(if $(strip $(PROFILE_$1_SHARED_LINKER)),$(PROFILE_$1_SHARED_LINKER),$(SHARED_LINKER))
+
+ARCHFLAGS_$1 := $(if $(strip $(PROFILE_$1_ARCHFLAGS)),$(PROFILE_$1_ARCHFLAGS),$(call default_archflags_for_arch,$(call resolved_profile_arch,$1)))
+EXE_ARCHFLAGS_$1 := $(if $(strip $(PROFILE_$1_EXE_ARCHFLAGS)),$(PROFILE_$1_EXE_ARCHFLAGS),$(call default_exe_archflags_for_arch,$(call resolved_profile_arch,$1),$(if $(strip $(PROFILE_$1_EXE_LINKER)),$(PROFILE_$1_EXE_LINKER),$(EXE_LINKER))))
+SHARED_ARCHFLAGS_$1 := $(if $(strip $(PROFILE_$1_SHARED_ARCHFLAGS)),$(PROFILE_$1_SHARED_ARCHFLAGS),$(call default_shared_archflags_for_arch,$(call resolved_profile_arch,$1),$(if $(strip $(PROFILE_$1_SHARED_LINKER)),$(PROFILE_$1_SHARED_LINKER),$(SHARED_LINKER))))
+
+PROFILE_BUILD_EXE_$1 := $(if $(strip $(PROFILE_$1_BUILD_EXE)),$(PROFILE_$1_BUILD_EXE),$(BUILD_EXE))
+PROFILE_BUILD_STATIC_$1 := $(if $(strip $(PROFILE_$1_BUILD_STATIC)),$(PROFILE_$1_BUILD_STATIC),$(BUILD_STATIC))
+PROFILE_BUILD_SHARED_$1 := $(if $(strip $(PROFILE_$1_BUILD_SHARED)),$(PROFILE_$1_BUILD_SHARED),$(BUILD_SHARED))
+
+EXEC_OUT_$1 := $(if $(strip $(PROFILE_$1_EXEC_OUT)),$(PROFILE_$1_EXEC_OUT),$(if $(strip $(EXEC_OUT_$1)),$(EXEC_OUT_$1),$(if $(and $(filter $1,$(SINGLE_PROFILE)),$(strip $(EXEC_OUT))),$(EXEC_OUT),$(call default_exec_out,$1))))
+STATIC_OUT_$1 := $(if $(strip $(PROFILE_$1_STATIC_OUT)),$(PROFILE_$1_STATIC_OUT),$(if $(strip $(STATIC_OUT_$1)),$(STATIC_OUT_$1),$(if $(and $(filter $1,$(SINGLE_PROFILE)),$(strip $(STATIC_OUT))),$(STATIC_OUT),$(call default_static_out,$1))))
+SHARED_OUT_$1 := $(if $(strip $(PROFILE_$1_SHARED_OUT)),$(PROFILE_$1_SHARED_OUT),$(if $(strip $(SHARED_OUT_$1)),$(SHARED_OUT_$1),$(if $(and $(filter $1,$(SINGLE_PROFILE)),$(strip $(SHARED_OUT))),$(SHARED_OUT),$(call default_shared_out,$1))))
 endef
 
-$(foreach abi,m32 m64,$(eval $(call init_abi_outputs,$(abi))))
-
-BUILD_TARGETS :=
-
-ifeq ($(BUILD_EXE),1)
-  BUILD_TARGETS += exe
-endif
-
-ifeq ($(BUILD_STATIC),1)
-  BUILD_TARGETS += static
-endif
-
-ifeq ($(BUILD_SHARED),1)
-  BUILD_TARGETS += shared
-endif
-
-ifeq ($(strip $(BUILD_TARGETS)),)
-  $(warning No build targets enabled (BUILD_EXE/STATIC/SHARED all 0))
-endif
+$(foreach profile,$(ACTIVE_PROFILES),$(eval $(call init_profile,$(profile))))
 
 # -----------------------------------
 # Source discovery
@@ -225,7 +251,7 @@ LIB_C_SOURCES := $(shell [ -d "$(LIB_DIR)" ] && find "$(LIB_DIR)" -type f -name 
 # Object file lists
 # ------------------------------------
 
-define define_abi_objects
+define define_profile_objects
 BIN_S_FLAGGED_SOURCES_$1 := $(wildcard $(BIN_DIR)/*.$1.S)
 BIN_S_PLAIN_SOURCES_$1 := $(filter-out $(call flagged_to_plain,$$(BIN_S_FLAGGED_SOURCES_$1)),$(wildcard $(BIN_DIR)/*.S))
 
@@ -265,16 +291,20 @@ LIB_PIC_OBJECTS_$1 := $$(LIB_CPP_PIC_OBJECTS_$1) $$(LIB_C_PIC_OBJECTS_$1) $$(LIB
 ALL_OBJECTS_$1 := $$(BIN_OBJECTS_$1) $$(LIB_OBJECTS_$1) $$(LIB_PIC_OBJECTS_$1)
 endef
 
-$(foreach abi,$(BUILD_ABIS),$(eval $(call define_abi_objects,$(abi))))
+$(foreach profile,$(ACTIVE_PROFILES),$(eval $(call define_profile_objects,$(profile))))
 
-EXE_TARGETS := $(foreach abi,$(BUILD_ABIS),exe-$(abi))
-STATIC_TARGETS := $(foreach abi,$(BUILD_ABIS),static-$(abi))
-SHARED_TARGETS := $(foreach abi,$(BUILD_ABIS),shared-$(abi))
-ABI_TARGETS := $(EXE_TARGETS) $(STATIC_TARGETS) $(SHARED_TARGETS)
-EXEC_OUTS := $(foreach abi,$(BUILD_ABIS),$(EXEC_OUT_$(abi)))
-STATIC_OUTS := $(foreach abi,$(BUILD_ABIS),$(STATIC_OUT_$(abi)))
-SHARED_OUTS := $(foreach abi,$(BUILD_ABIS),$(SHARED_OUT_$(abi)))
-ALL_OBJECTS := $(foreach abi,$(BUILD_ABIS),$(ALL_OBJECTS_$(abi)))
+EXE_TARGETS := $(foreach profile,$(ACTIVE_PROFILES),$(if $(filter 1,$(PROFILE_BUILD_EXE_$(profile))),exe-$(profile)))
+STATIC_TARGETS := $(foreach profile,$(ACTIVE_PROFILES),$(if $(filter 1,$(PROFILE_BUILD_STATIC_$(profile))),static-$(profile)))
+SHARED_TARGETS := $(foreach profile,$(ACTIVE_PROFILES),$(if $(filter 1,$(PROFILE_BUILD_SHARED_$(profile))),shared-$(profile)))
+PROFILE_TARGETS := $(EXE_TARGETS) $(STATIC_TARGETS) $(SHARED_TARGETS)
+EXEC_OUTS := $(foreach profile,$(ACTIVE_PROFILES),$(if $(filter 1,$(PROFILE_BUILD_EXE_$(profile))),$(EXEC_OUT_$(profile))))
+STATIC_OUTS := $(foreach profile,$(ACTIVE_PROFILES),$(if $(filter 1,$(PROFILE_BUILD_STATIC_$(profile))),$(STATIC_OUT_$(profile))))
+SHARED_OUTS := $(foreach profile,$(ACTIVE_PROFILES),$(if $(filter 1,$(PROFILE_BUILD_SHARED_$(profile))),$(SHARED_OUT_$(profile))))
+ALL_OBJECTS := $(foreach profile,$(ACTIVE_PROFILES),$(ALL_OBJECTS_$(profile)))
+
+ifeq ($(strip $(PROFILE_TARGETS)),)
+  $(warning No build targets enabled across active profiles)
+endif
 
 # -----------------------------------
 # Verbose mode
@@ -293,108 +323,108 @@ MAKEFLAGS += --no-print-directory
 # Compilation rules
 # -----------------------------------
 
-define define_abi_rules
+define define_profile_rules
 # C++ sources in src/bin (no PIC)
-$$(call abi_obj_dir,$1)/bin/%.o: $$(BIN_DIR)/%.cpp
+$$(call profile_obj_dir,$1)/bin/%.o: $$(BIN_DIR)/%.cpp
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "C++ (bin, $1): $$<"
-	$$(Q)$$(CXX) $$(CPPFLAGS) $$(CXXFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
+	$$(Q)$$(CXX) $$(CPPFLAGS_$1) $$(CXXFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # Assembly sources in src/bin (.$1.S files, preprocessed)
-$$(call abi_obj_dir,$1)/bin/%.o: $$(BIN_DIR)/%.$1.S
+$$(call profile_obj_dir,$1)/bin/%.o: $$(BIN_DIR)/%.$1.S
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "ASM (.S, bin, $1): $$<"
-	$$(Q)$$(CXX) $$(CPPFLAGS) $$(SFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
+	$$(Q)$$(CXX) $$(CPPFLAGS_$1) $$(SFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # Assembly sources in src/bin (.S files, preprocessed)
-$$(call abi_obj_dir,$1)/bin/%.o: $$(BIN_DIR)/%.S
+$$(call profile_obj_dir,$1)/bin/%.o: $$(BIN_DIR)/%.S
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "ASM (.S, bin, $1): $$<"
-	$$(Q)$$(CXX) $$(CPPFLAGS) $$(SFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
+	$$(Q)$$(CXX) $$(CPPFLAGS_$1) $$(SFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # Assembly sources in src/bin (.$1.asm files, preprocessed)
-$$(call abi_obj_dir,$1)/bin/%.o: $$(BIN_DIR)/%.$1.asm
+$$(call profile_obj_dir,$1)/bin/%.o: $$(BIN_DIR)/%.$1.asm
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "ASM (.asm, bin, $1): $$<"
-	$$(Q)$$(CXX) $$(CPPFLAGS) $$(ASMFLAGS_$1) $$(ARCHFLAGS_$1) -x assembler-with-cpp -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
+	$$(Q)$$(CXX) $$(CPPFLAGS_$1) $$(ASMFLAGS_$1) $$(ARCHFLAGS_$1) -x assembler-with-cpp -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # Assembly sources in src/bin (.asm files, preprocessed)
-$$(call abi_obj_dir,$1)/bin/%.o: $$(BIN_DIR)/%.asm
+$$(call profile_obj_dir,$1)/bin/%.o: $$(BIN_DIR)/%.asm
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "ASM (.asm, bin, $1): $$<"
-	$$(Q)$$(CXX) $$(CPPFLAGS) $$(ASMFLAGS_$1) $$(ARCHFLAGS_$1) -x assembler-with-cpp -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
+	$$(Q)$$(CXX) $$(CPPFLAGS_$1) $$(ASMFLAGS_$1) $$(ARCHFLAGS_$1) -x assembler-with-cpp -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # C++ sources in src/lib
-$$(call abi_obj_dir,$1)/lib/%.o: $$(LIB_DIR)/%.cpp
+$$(call profile_obj_dir,$1)/lib/%.o: $$(LIB_DIR)/%.cpp
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "C++ (lib, $1): $$<"
-	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS) $$(CXXFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
+	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS_$1) $$(CXXFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # C sources in src/lib
-$$(call abi_obj_dir,$1)/lib/%.o: $$(LIB_DIR)/%.c
+$$(call profile_obj_dir,$1)/lib/%.o: $$(LIB_DIR)/%.c
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "C (lib, $1): $$<"
-	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS) $$(ARCHFLAGS_$1) -x c -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
+	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS_$1) $$(ARCHFLAGS_$1) -x c -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # C++ sources in src/lib compiled with PIC for shared library target
-$$(call abi_obj_dir,$1)/lib/%.pic.o: $$(LIB_DIR)/%.cpp
+$$(call profile_obj_dir,$1)/lib/%.pic.o: $$(LIB_DIR)/%.cpp
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "C++ (lib,pic,$1): $$<"
-	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS) $$(CXXFLAGS_$1) $$(ARCHFLAGS_$1) -fPIC -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
+	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS_$1) $$(CXXFLAGS_$1) $$(ARCHFLAGS_$1) -fPIC -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # C sources in src/lib compiled with PIC for shared library target
-$$(call abi_obj_dir,$1)/lib/%.pic.o: $$(LIB_DIR)/%.c
+$$(call profile_obj_dir,$1)/lib/%.pic.o: $$(LIB_DIR)/%.c
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "C (lib,pic,$1): $$<"
-	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS) $$(ARCHFLAGS_$1) -fPIC -x c -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
+	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS_$1) $$(ARCHFLAGS_$1) -fPIC -x c -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # Assembly sources in src/lib (.$1.S files, preprocessed)
-$$(call abi_obj_dir,$1)/lib/%.o: $$(LIB_DIR)/%.$1.S
+$$(call profile_obj_dir,$1)/lib/%.o: $$(LIB_DIR)/%.$1.S
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "ASM (.S, $1): $$<"
-	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS) $$(SFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
+	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS_$1) $$(SFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # Assembly sources in src/lib (.S files, preprocessed)
-$$(call abi_obj_dir,$1)/lib/%.o: $$(LIB_DIR)/%.S
+$$(call profile_obj_dir,$1)/lib/%.o: $$(LIB_DIR)/%.S
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "ASM (.S, $1): $$<"
-	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS) $$(SFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
+	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS_$1) $$(SFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # Assembly sources in src/lib (.$1.S files, preprocessed) compiled with PIC
-$$(call abi_obj_dir,$1)/lib/%.pic.o: $$(LIB_DIR)/%.$1.S
+$$(call profile_obj_dir,$1)/lib/%.pic.o: $$(LIB_DIR)/%.$1.S
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "ASM (.S, pic, $1): $$<"
-	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS) $$(S_PICFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
+	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS_$1) $$(S_PICFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # Assembly sources in src/lib (.S files, preprocessed) compiled with PIC
-$$(call abi_obj_dir,$1)/lib/%.pic.o: $$(LIB_DIR)/%.S
+$$(call profile_obj_dir,$1)/lib/%.pic.o: $$(LIB_DIR)/%.S
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "ASM (.S, pic, $1): $$<"
-	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS) $$(S_PICFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
+	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS_$1) $$(S_PICFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # Assembly sources in src/lib (.$1.asm files, preprocessed)
-$$(call abi_obj_dir,$1)/lib/%.o: $$(LIB_DIR)/%.$1.asm
+$$(call profile_obj_dir,$1)/lib/%.o: $$(LIB_DIR)/%.$1.asm
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "ASM (.asm, $1): $$<"
-	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS) $$(ASMFLAGS_$1) $$(ARCHFLAGS_$1) -x assembler-with-cpp -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
+	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS_$1) $$(ASMFLAGS_$1) $$(ARCHFLAGS_$1) -x assembler-with-cpp -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # Assembly sources in src/lib (.asm files, raw assembly)
-$$(call abi_obj_dir,$1)/lib/%.o: $$(LIB_DIR)/%.asm
+$$(call profile_obj_dir,$1)/lib/%.o: $$(LIB_DIR)/%.asm
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "ASM (.asm, $1): $$<"
-	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS) $$(ASMFLAGS_$1) $$(ARCHFLAGS_$1) -x assembler-with-cpp -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
+	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS_$1) $$(ASMFLAGS_$1) $$(ARCHFLAGS_$1) -x assembler-with-cpp -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # Assembly sources in src/lib (.$1.asm files, preprocessed) compiled with PIC
-$$(call abi_obj_dir,$1)/lib/%.pic.o: $$(LIB_DIR)/%.$1.asm
+$$(call profile_obj_dir,$1)/lib/%.pic.o: $$(LIB_DIR)/%.$1.asm
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "ASM (.asm, pic, $1): $$<"
-	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS) $$(ASM_PICFLAGS_$1) $$(ARCHFLAGS_$1) -x assembler-with-cpp -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
+	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS_$1) $$(ASM_PICFLAGS_$1) $$(ARCHFLAGS_$1) -x assembler-with-cpp -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 # Assembly sources in src/lib (.asm files, raw assembly) compiled with PIC
-$$(call abi_obj_dir,$1)/lib/%.pic.o: $$(LIB_DIR)/%.asm
+$$(call profile_obj_dir,$1)/lib/%.pic.o: $$(LIB_DIR)/%.asm
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "ASM (.asm, pic, $1): $$<"
-	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS) $$(ASM_PICFLAGS_$1) $$(ARCHFLAGS_$1) -x assembler-with-cpp -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
+	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS_$1) $$(ASM_PICFLAGS_$1) $$(ARCHFLAGS_$1) -x assembler-with-cpp -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
 .PHONY: exe-$1
 exe-$1: dep-incmap $$(EXEC_OUT_$1)
@@ -402,7 +432,7 @@ exe-$1: dep-incmap $$(EXEC_OUT_$1)
 $$(EXEC_OUT_$1): $$(BIN_OBJECTS_$1) $$(LIB_OBJECTS_$1)
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "Link (exe, $1): $$@"
-	$$(Q)$$(EXE_LINKER) $$(LDFLAGS_$1) $$(EXE_ARCHFLAGS_$1) -o $$@ $$^ $$(LDLIBS)
+	$$(Q)$$(EXE_LINKER_$1) $$(LDFLAGS_EXE_$1) $$(EXE_ARCHFLAGS_$1) -o $$@ $$^ $$(LDLIBS_EXE_$1)
 
 .PHONY: static-$1
 static-$1: dep-incmap $$(STATIC_OUT_$1)
@@ -419,17 +449,17 @@ shared-$1: dep-incmap $$(SHARED_OUT_$1)
 $$(SHARED_OUT_$1): $$(LIB_PIC_OBJECTS_$1)
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "Link (shared, $1): $$@"
-	$$(Q)$$(SHARED_LINKER) -shared $$(LDFLAGS_$1) $$(SHARED_ARCHFLAGS_$1) -o $$@ $$^ $$(LDLIBS)
+	$$(Q)$$(SHARED_LINKER_$1) -shared $$(LDFLAGS_SHARED_$1) $$(SHARED_ARCHFLAGS_$1) -o $$@ $$^ $$(LDLIBS_SHARED_$1)
 endef
 
-$(foreach abi,$(BUILD_ABIS),$(eval $(call define_abi_rules,$(abi))))
+$(foreach profile,$(ACTIVE_PROFILES),$(eval $(call define_profile_rules,$(profile))))
 
 # -----------------------------------
 # Executable
 # -----------------------------------
 .DEFAULT_GOAL := all
 
-all: dep-incmap $(BUILD_TARGETS)
+all: dep-incmap $(PROFILE_TARGETS)
 
 exe: $(EXE_TARGETS)
 
@@ -455,26 +485,24 @@ DEPS := $(ALL_OBJECTS:.o=.d)
 .PHONY: help
 help:
 	@echo "Targets:"
-	@echo "  all        Build enabled target/ABI combinations"
-	@echo "  exe        Build executable for enabled ABIs"
-	@echo "  static     Build static library for enabled ABIs"
-	@echo "  shared     Build shared library for enabled ABIs"
-	@echo "  exe-m32    Build 32-bit executable (with BUILD_M32=1)"
-	@echo "  exe-m64    Build 64-bit executable (with BUILD_M64=1)"
-	@echo "  static-m32 Build 32-bit static library (with BUILD_M32=1)"
-	@echo "  static-m64 Build 64-bit static library (with BUILD_M64=1)"
-	@echo "  shared-m32 Build 32-bit shared library (with BUILD_M32=1)"
-	@echo "  shared-m64 Build 64-bit shared library (with BUILD_M64=1)"
+	@echo "  all           Build enabled target/profile combinations"
+	@echo "  exe           Build executables for enabled profiles"
+	@echo "  static        Build static libraries for enabled profiles"
+	@echo "  shared        Build shared libraries for enabled profiles"
+	@echo "  exe-<profile> Build one profile's executable"
+	@echo "  static-<profile> Build one profile's static library"
+	@echo "  shared-<profile> Build one profile's shared library"
 	@echo "  tests      Run unit + system tests (if present)"
 	@echo "  ut         Run unit tests"
 	@echo "  sy         Run system tests"
 	@echo "  clean      Remove build artefacts"
-	@echo "  distclean  Same as clean"
 	@echo ""
 	@echo "Options:"
 	@echo "  MODE=debug|release"
+	@echo "  BUILD_PROFILES=\"name...\"  Enable named build profiles"
 	@echo "  BUILD_M32=0|1        Enable 32-bit build graph (default: 0)"
 	@echo "  BUILD_M64=0|1        Enable 64-bit build graph (default: 1)"
+	@echo "  PROFILE_<name>_...   Profile-specific overrides for flags, outputs, and target enables"
 	@echo "  VERBOSE=1"
 	@echo "  FILTER=<substring>   Filter tests by name (e.g. make tests FILTER=math)"
 
@@ -550,6 +578,4 @@ clean-tests:
 
 clean: clean-all clean-tests
 
-distclean: clean
-
-.PHONY: all exe static shared $(ABI_TARGETS) tests ut sy dep-incmap clean clean-all clean-tests distclean
+.PHONY: all exe static shared $(PROFILE_TARGETS) tests ut sy dep-incmap clean clean-all clean-tests distclean
