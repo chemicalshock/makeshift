@@ -514,6 +514,8 @@ dep-incmap:
 			ln -sfn "$(DEP_ROOT_ABS)/$$d/src/inc/$$d" "$(DEP_MAP_DIR)/$$d"; \
 		elif [ -d "$(DEP_ROOT)/$$d/src/inc" ]; then \
 			ln -sfn "$(DEP_ROOT_ABS)/$$d/src/inc" "$(DEP_MAP_DIR)/$$d"; \
+		elif [ -d "$(DEP_ROOT)/$$d/include" ]; then \
+			ln -sfn "$(DEP_ROOT_ABS)/$$d/include" "$(DEP_MAP_DIR)/$$d"; \
 		fi; \
 	done
 
