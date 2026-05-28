@@ -15,10 +15,10 @@
 # -----------------------------------
 # Directory layout
 # -----------------------------------
-SRC_DIR := src
-BIN_DIR := $(SRC_DIR)/bin
-LIB_DIR := $(SRC_DIR)/lib
-INC_DIR := $(SRC_DIR)/inc
+SRC_DIR ?= src
+BIN_DIR ?= $(if $(wildcard $(SRC_DIR)/bin),$(SRC_DIR)/bin,$(SRC_DIR))
+LIB_DIR ?= $(if $(wildcard $(SRC_DIR)/lib),$(SRC_DIR)/lib,)
+INC_DIR ?= $(if $(wildcard inc),inc,$(SRC_DIR)/inc)
 
 # automatically collect every subdirectory beneath the public include
 # tree. This saves callers from having to add -I for each new component
@@ -48,11 +48,13 @@ TST_SY_DIR := $(if $(wildcard $(TST_DIR)/sy),$(TST_DIR)/sy,$(LEGACY_TST_DIR)/sy)
 # -----------------------------------
 DEP_ROOT := dep
 DEP_ROOT_ABS := $(abspath $(DEP_ROOT))
+BUILD_UID := $(shell id -u 2>/dev/null || echo 0)
 # Keep the dependency include map shared across build profiles; the
 # symlinked include tree itself is architecture-neutral.
-DEP_MAP_DIR := $(OBJ_DIR)/depinc
+DEP_MAP_DIR ?= $(OBJ_DIR)/depinc-$(BUILD_UID)
 DEP_NAMES := $(shell [ -d "$(DEP_ROOT)" ] && for p in "$(DEP_ROOT)"/*; do [ -d "$$p" ] && basename "$$p"; done || true)
-DEP_INC_DIRS := $(wildcard $(DEP_ROOT)/*/src/inc)
+dep_public_inc_dir = $(firstword $(wildcard $(DEP_ROOT)/$(1)/inc $(DEP_ROOT)/$(1)/src/inc $(DEP_ROOT)/$(1)/include))
+DEP_INC_DIRS := $(strip $(foreach dep,$(DEP_NAMES),$(call dep_public_inc_dir,$(dep))))
 DEP_INC_FLAGS := $(foreach dir,$(DEP_INC_DIRS),-I$(dir))
 
 # -----------------------------------
@@ -65,7 +67,7 @@ SHARED_LINKER ?= $(CXX)
 
 # MODE and CXX_STD may be set in makefile.project.mk
 MODE ?= debug
-CXX_STD ?= c++20
+CXX_STD ?= c++17
 FILTER ?= $(filter)
 
 # -----------------------------------
@@ -324,104 +326,74 @@ MAKEFLAGS += --no-print-directory
 # -----------------------------------
 
 define define_profile_rules
-# C++ sources in src/bin (no PIC)
-$$(call profile_obj_dir,$1)/bin/%.o: $$(BIN_DIR)/%.cpp
+# C++ sources under src/ (no PIC)
+$$(call profile_obj_dir,$1)/%.o: $$(SRC_DIR)/%.cpp
 	$$(Q)mkdir -p $$(dir $$@)
-	$$(Q)echo "C++ (bin, $1): $$<"
-	$$(Q)$$(CXX) $$(CPPFLAGS_$1) $$(CXXFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
-
-# Assembly sources in src/bin (.$1.S files, preprocessed)
-$$(call profile_obj_dir,$1)/bin/%.o: $$(BIN_DIR)/%.$1.S
-	$$(Q)mkdir -p $$(dir $$@)
-	$$(Q)echo "ASM (.S, bin, $1): $$<"
-	$$(Q)$$(CXX) $$(CPPFLAGS_$1) $$(SFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
-
-# Assembly sources in src/bin (.S files, preprocessed)
-$$(call profile_obj_dir,$1)/bin/%.o: $$(BIN_DIR)/%.S
-	$$(Q)mkdir -p $$(dir $$@)
-	$$(Q)echo "ASM (.S, bin, $1): $$<"
-	$$(Q)$$(CXX) $$(CPPFLAGS_$1) $$(SFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
-
-# Assembly sources in src/bin (.$1.asm files, preprocessed)
-$$(call profile_obj_dir,$1)/bin/%.o: $$(BIN_DIR)/%.$1.asm
-	$$(Q)mkdir -p $$(dir $$@)
-	$$(Q)echo "ASM (.asm, bin, $1): $$<"
-	$$(Q)$$(CXX) $$(CPPFLAGS_$1) $$(ASMFLAGS_$1) $$(ARCHFLAGS_$1) -x assembler-with-cpp -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
-
-# Assembly sources in src/bin (.asm files, preprocessed)
-$$(call profile_obj_dir,$1)/bin/%.o: $$(BIN_DIR)/%.asm
-	$$(Q)mkdir -p $$(dir $$@)
-	$$(Q)echo "ASM (.asm, bin, $1): $$<"
-	$$(Q)$$(CXX) $$(CPPFLAGS_$1) $$(ASMFLAGS_$1) $$(ARCHFLAGS_$1) -x assembler-with-cpp -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
-
-# C++ sources in src/lib
-$$(call profile_obj_dir,$1)/lib/%.o: $$(LIB_DIR)/%.cpp
-	$$(Q)mkdir -p $$(dir $$@)
-	$$(Q)echo "C++ (lib, $1): $$<"
+	$$(Q)echo "C++ ($1): $$<"
 	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS_$1) $$(CXXFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
-# C sources in src/lib
-$$(call profile_obj_dir,$1)/lib/%.o: $$(LIB_DIR)/%.c
+# C sources under src/ (no PIC)
+$$(call profile_obj_dir,$1)/%.o: $$(SRC_DIR)/%.c
 	$$(Q)mkdir -p $$(dir $$@)
-	$$(Q)echo "C (lib, $1): $$<"
+	$$(Q)echo "C ($1): $$<"
 	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS_$1) $$(ARCHFLAGS_$1) -x c -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
-# C++ sources in src/lib compiled with PIC for shared library target
-$$(call profile_obj_dir,$1)/lib/%.pic.o: $$(LIB_DIR)/%.cpp
+# C++ sources under src/ compiled with PIC for shared library target
+$$(call profile_obj_dir,$1)/%.pic.o: $$(SRC_DIR)/%.cpp
 	$$(Q)mkdir -p $$(dir $$@)
-	$$(Q)echo "C++ (lib,pic,$1): $$<"
+	$$(Q)echo "C++ (pic, $1): $$<"
 	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS_$1) $$(CXXFLAGS_$1) $$(ARCHFLAGS_$1) -fPIC -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
-# C sources in src/lib compiled with PIC for shared library target
-$$(call profile_obj_dir,$1)/lib/%.pic.o: $$(LIB_DIR)/%.c
+# C sources under src/ compiled with PIC for shared library target
+$$(call profile_obj_dir,$1)/%.pic.o: $$(SRC_DIR)/%.c
 	$$(Q)mkdir -p $$(dir $$@)
-	$$(Q)echo "C (lib,pic,$1): $$<"
+	$$(Q)echo "C (pic, $1): $$<"
 	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS_$1) $$(ARCHFLAGS_$1) -fPIC -x c -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
-# Assembly sources in src/lib (.$1.S files, preprocessed)
-$$(call profile_obj_dir,$1)/lib/%.o: $$(LIB_DIR)/%.$1.S
+# Assembly sources under src/ (.$1.S files, preprocessed)
+$$(call profile_obj_dir,$1)/%.o: $$(SRC_DIR)/%.$1.S
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "ASM (.S, $1): $$<"
 	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS_$1) $$(SFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
-# Assembly sources in src/lib (.S files, preprocessed)
-$$(call profile_obj_dir,$1)/lib/%.o: $$(LIB_DIR)/%.S
+# Assembly sources under src/ (.S files, preprocessed)
+$$(call profile_obj_dir,$1)/%.o: $$(SRC_DIR)/%.S
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "ASM (.S, $1): $$<"
 	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS_$1) $$(SFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
-# Assembly sources in src/lib (.$1.S files, preprocessed) compiled with PIC
-$$(call profile_obj_dir,$1)/lib/%.pic.o: $$(LIB_DIR)/%.$1.S
+# Assembly sources under src/ (.$1.S files, preprocessed) compiled with PIC
+$$(call profile_obj_dir,$1)/%.pic.o: $$(SRC_DIR)/%.$1.S
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "ASM (.S, pic, $1): $$<"
 	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS_$1) $$(S_PICFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
-# Assembly sources in src/lib (.S files, preprocessed) compiled with PIC
-$$(call profile_obj_dir,$1)/lib/%.pic.o: $$(LIB_DIR)/%.S
+# Assembly sources under src/ (.S files, preprocessed) compiled with PIC
+$$(call profile_obj_dir,$1)/%.pic.o: $$(SRC_DIR)/%.S
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "ASM (.S, pic, $1): $$<"
 	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS_$1) $$(S_PICFLAGS_$1) $$(ARCHFLAGS_$1) -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
-# Assembly sources in src/lib (.$1.asm files, preprocessed)
-$$(call profile_obj_dir,$1)/lib/%.o: $$(LIB_DIR)/%.$1.asm
+# Assembly sources under src/ (.$1.asm files, preprocessed)
+$$(call profile_obj_dir,$1)/%.o: $$(SRC_DIR)/%.$1.asm
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "ASM (.asm, $1): $$<"
 	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS_$1) $$(ASMFLAGS_$1) $$(ARCHFLAGS_$1) -x assembler-with-cpp -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
-# Assembly sources in src/lib (.asm files, raw assembly)
-$$(call profile_obj_dir,$1)/lib/%.o: $$(LIB_DIR)/%.asm
+# Assembly sources under src/ (.asm files, raw assembly)
+$$(call profile_obj_dir,$1)/%.o: $$(SRC_DIR)/%.asm
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "ASM (.asm, $1): $$<"
 	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS_$1) $$(ASMFLAGS_$1) $$(ARCHFLAGS_$1) -x assembler-with-cpp -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
-# Assembly sources in src/lib (.$1.asm files, preprocessed) compiled with PIC
-$$(call profile_obj_dir,$1)/lib/%.pic.o: $$(LIB_DIR)/%.$1.asm
+# Assembly sources under src/ (.$1.asm files, preprocessed) compiled with PIC
+$$(call profile_obj_dir,$1)/%.pic.o: $$(SRC_DIR)/%.$1.asm
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "ASM (.asm, pic, $1): $$<"
 	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS_$1) $$(ASM_PICFLAGS_$1) $$(ARCHFLAGS_$1) -x assembler-with-cpp -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
 
-# Assembly sources in src/lib (.asm files, raw assembly) compiled with PIC
-$$(call profile_obj_dir,$1)/lib/%.pic.o: $$(LIB_DIR)/%.asm
+# Assembly sources under src/ (.asm files, raw assembly) compiled with PIC
+$$(call profile_obj_dir,$1)/%.pic.o: $$(SRC_DIR)/%.asm
 	$$(Q)mkdir -p $$(dir $$@)
 	$$(Q)echo "ASM (.asm, pic, $1): $$<"
 	$$(Q)$$(CXX) -I$$(INC_DIR)/$$(dir $$*) $$(CPPFLAGS_$1) $$(ASM_PICFLAGS_$1) $$(ARCHFLAGS_$1) -x assembler-with-cpp -MT $$@ -MF $$(@:.o=.d) -c $$< -o $$@
@@ -508,9 +480,14 @@ help:
 
 .PHONY: dep-incmap
 dep-incmap:
+	$(Q)rm -rf "$(DEP_MAP_DIR)"
 	$(Q)mkdir -p "$(DEP_MAP_DIR)"
 	$(Q)for d in $(DEP_NAMES); do \
-		if [ -d "$(DEP_ROOT)/$$d/src/inc/$$d" ]; then \
+		if [ -d "$(DEP_ROOT)/$$d/inc/$$d" ]; then \
+			ln -sfn "$(DEP_ROOT_ABS)/$$d/inc/$$d" "$(DEP_MAP_DIR)/$$d"; \
+		elif [ -d "$(DEP_ROOT)/$$d/inc" ]; then \
+			ln -sfn "$(DEP_ROOT_ABS)/$$d/inc" "$(DEP_MAP_DIR)/$$d"; \
+		elif [ -d "$(DEP_ROOT)/$$d/src/inc/$$d" ]; then \
 			ln -sfn "$(DEP_ROOT_ABS)/$$d/src/inc/$$d" "$(DEP_MAP_DIR)/$$d"; \
 		elif [ -d "$(DEP_ROOT)/$$d/src/inc" ]; then \
 			ln -sfn "$(DEP_ROOT_ABS)/$$d/src/inc" "$(DEP_MAP_DIR)/$$d"; \
